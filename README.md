@@ -2,7 +2,7 @@
 <img align="center" width="30%" alt="image" src="https://github.com/AI4Finance-Foundation/FinGPT/assets/31713746/e0371951-1ce1-488e-aa25-0992dafcc139">
 </div>
 
-# FinRL Trading Platform v2.0
+# FinRL-X: An AI-Native Modular Infrastructure for Quantitative Trading
 <p align="center">
   <img src="https://github.com/user-attachments/assets/80fe89bb-fb09-4267-b29a-76030512f8cf" width="500">
 </p>
