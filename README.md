@@ -295,7 +295,7 @@ alpaca.execute_portfolio_rebalance(target_weights={'AAPL': 0.3, 'MSFT': 0.7})
 
 ## Evolution from FinRL
 
-| | FinRL (2020) | FinRL-X (2025) |
+| | FinRL (2020) | FinRL-X (2026) |
 |:---|:---|:---|
 | **Paradigm** | DRL-only | AI-Native (ML + DRL + LLM-ready) |
 | **Architecture** | Coupled monolith | Decoupled modular layers |
