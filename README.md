@@ -447,6 +447,7 @@ This software is for **educational and research purposes only**.
 - [Financial Modeling Prep](https://financialmodelingprep.com/) - Professional financial data API
 - [WRDS (Wharton Research Data Services)](https://wrds.wharton.upenn.edu/) - Academic financial database
 - [Alpaca Markets](https://alpaca.markets/) - Brokerage API and market data
+
 **Built with ❤️ for the quantitative finance community**
 
 ---
