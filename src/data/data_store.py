@@ -214,6 +214,52 @@ class DataStore:
                 except sqlite3.OperationalError:
                     pass  # column already exists
 
+            # Macro time-series (FRED + Yahoo) — long-format, one row per
+            # (series_id, source, date). Added 2026-04-23 in Step 4 Component 1.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS macro_series (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    series_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    value REAL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(series_id, source, date)
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_macro_series_lookup
+                    ON macro_series(series_id, source, date)
+            ''')
+
+            # Earnings calendar — merged feed from /earnings (per-ticker) and
+            # /earnings-calendar (global). UNIQUE(ticker, date) means last-write-
+            # wins across sources; `source` column records provenance.
+            # Added 2026-04-24 in Step 4 Component 2.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS earnings_calendar (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    eps_actual REAL,
+                    eps_estimated REAL,
+                    revenue_actual REAL,
+                    revenue_estimated REAL,
+                    last_updated TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(ticker, date)
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_earnings_ticker_date
+                    ON earnings_calendar(ticker, date)
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_earnings_date
+                    ON earnings_calendar(date)
+            ''')
+
             conn.commit()
             logger.info(f"Initialized database at {self.db_path}")
 
@@ -1059,6 +1105,216 @@ class DataStore:
                    WHERE source = ? AND payload = ? AND ticker = ?
                    ORDER BY date DESC LIMIT 1''', (source, payload, ticker)
             )
+            row = cursor.fetchone()
+            return row[0] if row else None
+
+    # ── Macro time-series (FRED + Yahoo) ────────────────────────────────
+
+    def save_macro_series(self, df: pd.DataFrame, series_id: str, source: str) -> int:
+        """Upsert macro series rows. Expects a DataFrame with a DatetimeIndex (or
+        a `date` column) and a single value column. Idempotent via UNIQUE constraint
+        on (series_id, source, date). Stores NaN values verbatim as NULL.
+
+        Returns rows affected.
+        """
+        if df is None or len(df) == 0:
+            return 0
+
+        work = df.copy()
+        if isinstance(work.index, pd.DatetimeIndex):
+            work = work.reset_index()
+            date_col = work.columns[0]
+        elif 'date' in work.columns:
+            date_col = 'date'
+        elif 'Date' in work.columns:
+            date_col = 'Date'
+        else:
+            raise ValueError("save_macro_series expects DatetimeIndex or 'date' column")
+
+        # Value column: prefer explicit 'value', else first non-date column.
+        if 'value' in work.columns:
+            value_col = 'value'
+        else:
+            non_date = [c for c in work.columns if c != date_col]
+            if not non_date:
+                raise ValueError("save_macro_series: no value column found")
+            value_col = non_date[0]
+
+        rows = []
+        for _, r in work.iterrows():
+            d = r[date_col]
+            if isinstance(d, pd.Timestamp):
+                d = d.strftime('%Y-%m-%d')
+            elif d is None:
+                continue
+            else:
+                d = str(d)[:10]
+            v = r[value_col]
+            v = None if pd.isna(v) else float(v)
+            rows.append((series_id, source, d, v))
+
+        if not rows:
+            return 0
+
+        affected = 0
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            for row in rows:
+                try:
+                    cursor.execute(
+                        '''INSERT OR REPLACE INTO macro_series
+                           (series_id, source, date, value)
+                           VALUES (?, ?, ?, ?)''', row
+                    )
+                    affected += 1
+                except Exception as exc:
+                    logger.warning(f"Failed to save macro row {row[:3]}: {exc}")
+            conn.commit()
+        logger.info(f"Saved {affected} rows for {source} {series_id}")
+        return affected
+
+    def get_macro_series(self, series_id: str = None, source: str = None,
+                         start_date: str = None, end_date: str = None) -> pd.DataFrame:
+        """Load macro series rows from DB. All filters optional; returns long-format
+        DataFrame sorted by (series_id, source, date)."""
+        conditions, params = [], []
+        if series_id:
+            conditions.append("series_id = ?"); params.append(series_id)
+        if source:
+            conditions.append("source = ?"); params.append(source)
+        if start_date:
+            conditions.append("date >= ?"); params.append(start_date)
+        if end_date:
+            conditions.append("date <= ?"); params.append(end_date)
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = f"SELECT series_id, source, date, value FROM macro_series {where} ORDER BY series_id, source, date"
+
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql(sql, conn, params=params)
+
+    def get_macro_series_latest_date(self, series_id: str, source: str) -> Optional[str]:
+        """Return the max `date` stored for (series_id, source), or None if empty.
+        Used by fetchers to compute incremental-fetch start points."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''SELECT date FROM macro_series
+                   WHERE series_id = ? AND source = ?
+                   ORDER BY date DESC LIMIT 1''', (series_id, source)
+            )
+            row = cursor.fetchone()
+            return row[0] if row else None
+
+    # ── Earnings calendar ────────────────────────────────────────────────
+
+    def save_earnings_calendar(self, df: pd.DataFrame, source: str) -> int:
+        """Upsert earnings rows. Expects columns: ticker, date, eps_actual,
+        eps_estimated, revenue_actual, revenue_estimated, last_updated.
+        Idempotent via UNIQUE(ticker, date) — last write wins; `source` column
+        records which endpoint wrote this row. Returns rows affected."""
+        if df is None or len(df) == 0:
+            return 0
+
+        required = {'ticker', 'date'}
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"save_earnings_calendar missing columns: {missing}")
+
+        def _num(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        def _text(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            return str(v)
+
+        rows = []
+        for _, r in df.iterrows():
+            d = r['date']
+            if isinstance(d, pd.Timestamp):
+                d = d.strftime('%Y-%m-%d')
+            elif d is None:
+                continue
+            else:
+                d = str(d)[:10]
+            rows.append((
+                str(r['ticker']),
+                source,
+                d,
+                _num(r.get('eps_actual')),
+                _num(r.get('eps_estimated')),
+                _num(r.get('revenue_actual')),
+                _num(r.get('revenue_estimated')),
+                _text(r.get('last_updated')),
+            ))
+
+        if not rows:
+            return 0
+
+        affected = 0
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            for row in rows:
+                try:
+                    cursor.execute(
+                        '''INSERT OR REPLACE INTO earnings_calendar
+                           (ticker, source, date, eps_actual, eps_estimated,
+                            revenue_actual, revenue_estimated, last_updated)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', row
+                    )
+                    affected += 1
+                except Exception as exc:
+                    logger.warning(f"Failed to save earnings row {row[:3]}: {exc}")
+            conn.commit()
+        logger.info(f"Saved {affected} rows for earnings_calendar source={source}")
+        return affected
+
+    def get_earnings_calendar(self, ticker: str = None, source: str = None,
+                              start_date: str = None, end_date: str = None) -> pd.DataFrame:
+        """Load earnings rows. All filters optional; returns DataFrame sorted by
+        (ticker, date)."""
+        conditions, params = [], []
+        if ticker:
+            conditions.append("ticker = ?"); params.append(ticker)
+        if source:
+            conditions.append("source = ?"); params.append(source)
+        if start_date:
+            conditions.append("date >= ?"); params.append(start_date)
+        if end_date:
+            conditions.append("date <= ?"); params.append(end_date)
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = (f"SELECT ticker, source, date, eps_actual, eps_estimated, "
+               f"revenue_actual, revenue_estimated, last_updated "
+               f"FROM earnings_calendar {where} ORDER BY ticker, date")
+
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql(sql, conn, params=params)
+
+    def get_earnings_latest_date(self, ticker: str, source: str = None) -> Optional[str]:
+        """Return max `date` stored for ticker (optionally filtered by source).
+        Used by fetchers for incremental-fetch start points. Note: upcoming
+        announcements can be future-dated, so this may return a date past today."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            if source:
+                cursor.execute(
+                    '''SELECT date FROM earnings_calendar
+                       WHERE ticker = ? AND source = ?
+                       ORDER BY date DESC LIMIT 1''', (ticker, source)
+                )
+            else:
+                cursor.execute(
+                    '''SELECT date FROM earnings_calendar
+                       WHERE ticker = ?
+                       ORDER BY date DESC LIMIT 1''', (ticker,)
+                )
             row = cursor.fetchone()
             return row[0] if row else None
 

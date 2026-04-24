@@ -59,6 +59,17 @@ class FMPSettings(BaseSettings):
         env_prefix = "FMP_"
 
 
+class FREDSettings(BaseSettings):
+    """St. Louis Fed FRED API configuration settings.
+
+    Register for a free key at https://fred.stlouisfed.org/docs/api/api_key.html
+    """
+    api_key: Optional[SecretStr] = None
+
+    class Config:
+        env_prefix = "FRED_"
+
+
 class OpenAISettings(BaseSettings):
     """OpenAI GPT configuration settings."""
     api_key: Optional[SecretStr] = None
@@ -158,6 +169,7 @@ class FinRLSettings(BaseSettings):
     alpaca: AlpacaSettings = AlpacaSettings()
     wrds: WRDSSettings = WRDSSettings()
     fmp: FMPSettings = FMPSettings()
+    fred: FREDSettings = FREDSettings()
     openai: OpenAISettings = OpenAISettings()
     data: DataSettings = DataSettings()
     strategy: StrategySettings = StrategySettings()
