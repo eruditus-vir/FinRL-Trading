@@ -510,5 +510,5 @@ data/
 - **Rebalance cadence:** Run `--mixed-vintage` weekly during earnings season for fresher picks.
 - **val-cutoff updates:** Advance by one quarter when the next tradedate becomes past.
 - **FMP API limits:** `limit=40` returns ~10 years. Starter plan may return fewer.
-- **Ticker format:** FMP uses `-` (BRK-B), DB uses `.` (BRK.B). Conversion is automatic.
+- **Ticker format:** All tables use FMP-native hyphen format (`BRK-B`, `BF-B`). Legacy dot format was migrated 2026-04-24 in Step 4 Component 2.
 - **random_state=42:** All models are deterministic. Same data + same params = same results.

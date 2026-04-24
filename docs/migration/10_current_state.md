@@ -19,7 +19,7 @@ If it conflicts with an earlier migration doc (01-09), this doc is authoritative
 | `price_data` | 1,816,414 | 712 tickers | 2015-01-02 → 2026-04-21 | ✓ Healthy |
 | `fundamental_data` | 22,909 | 715 tickers | 2015-06-30 → 2026-03-31 | ✓ Healthy |
 | `macro_series` | 51,269 | 32 series (24 FRED + 8 Yahoo) | 2015-01-01 → 2026-04-23 | ✓ **Component 1 output** |
-| `earnings_calendar` | 29,424 | 685 tickers (135 rows FMP_CALENDAR, rest FMP_EARNINGS) | 2015-01-03 → 2027-01-27 | ✓ **Component 2 output** |
+| `earnings_calendar` | 29,515 | 687 tickers (133 rows FMP_CALENDAR, rest FMP_EARNINGS) | 2015-01-03 → 2027-01-27 | ✓ **Component 2 output** |
 | `raw_payloads` | 77,364 | 503 tickers | 2015-10-24 → 2025-09-30 | Cached FMP JSON for fundamentals |
 | `news_articles` | 60 | 3 tickers | 2024-08-28 → 2024-09-01 | Smoke-test data only; not yet bulk-pulled |
 | `sp500_components_details` | 4 | — | — | Point-in-time snapshots (survivorship-free source is the CSV) |
@@ -122,6 +122,7 @@ python scripts/verify_fixture_equivalence.py # → 13/13 passed
 - Fixture suite extended: 10 → 13 fixtures (earnings_AAPL/MSFT/NVDA 2020-2023)
 - All re-exports: `from src.data.data_fetcher import fetch_earnings_per_ticker` works
 - **First bulk run**: 29,454 rows pulled across 685 of 715 tickers (30 had no data — delisted/merged). 30 all-null placeholder rows from FMP (defunct tickers like BBBY, SIVB, FRC, ATVI) filtered at save time.
+- **Ticker-format migration (2026-04-24, post-bulk)**: discovered `fundamental_data` stored `BRK.B`/`BF.B` (dot format, legacy from Step 1 CSV import) while everything else uses FMP-native hyphen (`BRK-B`/`BF-B`). Migrated dots → hyphens in `fundamental_data` (80 rows) and `data/sp500_historical_constituents.csv` (2,709 daily snapshots). Removed `SYMBOL_ALIAS_FUND_TO_PRICE` map and its `.replace()` call from `scripts/verify_data_quality.py` alignment check — join now works directly on the ticker column. Updated `ML_STOCK_SELECTION.md:513` doc note. Refetched earnings for `BRK-B`/`BF-B` — 91 new rows, coverage now 687/715 tickers. CSV backup at `data/sp500_historical_constituents.csv.bak`. L3 alignment check (99.95% coverage) still green — critical proof of end-to-end consistency.
 - **Design note on hybrid sources**: per-ticker endpoint is authoritative for historical (2015→now, estimates populated, clean S&P-500 scope). Global-calendar is for forward watch only; running it with `--from today` avoids overwriting historical per-ticker rows via the `UNIQUE(ticker, date)` constraint.
 - **Design note on incremental**: `fetch_earnings_per_ticker` does NOT skip based on DB freshness — it always makes the 1 API call and upserts. Rationale: upcoming-earnings rows need their actuals updated post-announcement, and FMP occasionally revises historical EPS; skipping creates a freshness gap for a zero-call saving.
 

@@ -26,12 +26,6 @@ import pandas as pd
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = REPO_ROOT / "data" / "cache" / "finrl_trading.db"
 
-# Alias map used by any join between fundamentals and prices.
-# fundamentals uses period-separated symbols, FMP price data uses dash-separated.
-# FB/META: pre-rename FB history is under META in FMP; post-2022 FB is a new company.
-SYMBOL_ALIAS_FUND_TO_PRICE = {"BRK.B": "BRK-B", "BF.B": "BF-B"}
-
-
 # ─── utilities ──────────────────────────────────────────────────────────────
 
 class Check:
@@ -219,8 +213,7 @@ def check_fundamentals_prices_alignment(conn):
         conn,
     )
     p = pd.read_sql("SELECT ticker AS p_ticker, date AS p_date, close FROM price_data", conn)
-    f["price_ticker"] = f["ticker"].replace(SYMBOL_ALIAS_FUND_TO_PRICE)
-    m = f.merge(p, left_on=["price_ticker", "actual_tradedate"],
+    m = f.merge(p, left_on=["ticker", "actual_tradedate"],
                 right_on=["p_ticker", "p_date"], how="left")
     matched = int(m["close"].notna().sum())
     total = len(m)
