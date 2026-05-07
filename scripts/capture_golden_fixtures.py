@@ -70,6 +70,19 @@ SPLIT_FIXTURES = [
     ("AAPL", "2015-01-01", "2024-12-31"),
 ]
 
+# ETFs (Step 4 Component 5): SPY current snapshot + XLK historical price slice.
+ETF_HOLDINGS_FIXTURE_ETF = "SPY"
+ETF_PRICES_FIXTURES = [
+    ("XLK", "2020-01-01", "2023-12-31"),
+]
+
+# Analyst (Step 4 Component 6): historical grades window + 3-ticker price target
+# snapshot + AAPL estimates per period. Pinned to specific dates/periods for
+# fixture stability under accumulating snapshots.
+ANALYST_GRADES_FIXTURE = ("AAPL", "2018-01-01", "2024-12-31")
+ANALYST_TARGETS_FIXTURE_TICKERS = ["AAPL", "MSFT", "NVDA"]
+ANALYST_ESTIMATES_FIXTURE_TICKER = "AAPL"
+
 
 def _log(msg: str) -> None:
     print(f"[capture] {msg}", flush=True)
@@ -188,6 +201,73 @@ def capture_corporate_actions() -> None:
         _log(f"  rows={len(df):,} cols={len(df.columns)}  {time.time()-t0:.1f}s")
 
 
+def capture_etf() -> None:
+    """SPY holdings snapshot + XLK historical price slice. Read from DB
+    post-bulk to keep deterministic."""
+    from src.data.data_store import get_data_store
+    ds = get_data_store()
+
+    # SPY holdings — latest snapshot in DB
+    path = FIXTURE_DIR / f"etf_holdings_{ETF_HOLDINGS_FIXTURE_ETF}.pkl"
+    t0 = time.time()
+    _log(f"etf_holdings {ETF_HOLDINGS_FIXTURE_ETF} → {path.name} ...")
+    df = ds.get_etf_holdings(etf_symbol=ETF_HOLDINGS_FIXTURE_ETF)
+    # Pin to the latest snapshot_date so re-runs across multiple weekly snapshots
+    # don't break equivalence.
+    if not df.empty:
+        latest = df["snapshot_date"].max()
+        df = df[df["snapshot_date"] == latest].reset_index(drop=True)
+    df.to_pickle(path)
+    _log(f"  rows={len(df):,} cols={len(df.columns)}  {time.time()-t0:.1f}s")
+
+    # ETF prices — historical slice
+    from src.data.data_fetcher import fetch_price_data
+    for etf, start, end in ETF_PRICES_FIXTURES:
+        path = FIXTURE_DIR / f"etf_prices_{etf}.pkl"
+        t0 = time.time()
+        _log(f"etf_prices {etf} {start}..{end} → {path.name} ...")
+        df = fetch_price_data([etf], start, end)
+        df.to_pickle(path)
+        _log(f"  rows={len(df):,} cols={len(df.columns)}  {time.time()-t0:.1f}s")
+
+
+def capture_analyst() -> None:
+    """4 analyst fixtures: grades window, price targets sample (latest snapshot),
+    AAPL estimates per period."""
+    from src.data.data_store import get_data_store
+    ds = get_data_store()
+
+    ticker, start, end = ANALYST_GRADES_FIXTURE
+    path = FIXTURE_DIR / f"grades_{ticker}_{start[:4]}_{end[:4]}.pkl"
+    t0 = time.time()
+    _log(f"grades {ticker} {start}..{end} → {path.name} ...")
+    df = ds.get_analyst_grades(ticker=ticker, start_date=start, end_date=end)
+    df.to_pickle(path)
+    _log(f"  rows={len(df):,} cols={len(df.columns)}  {time.time()-t0:.1f}s")
+
+    path = FIXTURE_DIR / "price_targets_sample.pkl"
+    t0 = time.time()
+    _log(f"price_targets sample {ANALYST_TARGETS_FIXTURE_TICKERS} → {path.name} ...")
+    frames = [ds.get_price_target_consensus(ticker=t) for t in ANALYST_TARGETS_FIXTURE_TICKERS]
+    df = pd.concat([f for f in frames if not f.empty], ignore_index=True) \
+        if any(not f.empty for f in frames) else pd.DataFrame()
+    # Pin to latest snapshot_date so re-runs across multiple weekly snapshots
+    # don't break equivalence.
+    if not df.empty:
+        latest = df["snapshot_date"].max()
+        df = df[df["snapshot_date"] == latest].reset_index(drop=True)
+    df.to_pickle(path)
+    _log(f"  rows={len(df):,} cols={len(df.columns)}  {time.time()-t0:.1f}s")
+
+    for period in ("quarter", "annual"):
+        path = FIXTURE_DIR / f"estimates_{ANALYST_ESTIMATES_FIXTURE_TICKER}_{period}.pkl"
+        t0 = time.time()
+        _log(f"estimates {ANALYST_ESTIMATES_FIXTURE_TICKER} {period} → {path.name} ...")
+        df = ds.get_analyst_estimates(ticker=ANALYST_ESTIMATES_FIXTURE_TICKER, period=period)
+        df.to_pickle(path)
+        _log(f"  rows={len(df):,} cols={len(df.columns)}  {time.time()-t0:.1f}s")
+
+
 def capture_sp500() -> None:
     from src.data.data_fetcher import fetch_sp500_tickers
     path = FIXTURE_DIR / "sp500.pkl"
@@ -221,6 +301,8 @@ def main():
     capture_earnings()
     capture_ownership()
     capture_corporate_actions()
+    capture_etf()
+    capture_analyst()
 
     _log("DONE. Fixtures in " + str(FIXTURE_DIR))
     for p in sorted(FIXTURE_DIR.glob("*.pkl")):

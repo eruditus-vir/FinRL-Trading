@@ -61,6 +61,17 @@ SPLIT_FIXTURES = [
     ("AAPL", "2015-01-01", "2024-12-31"),
 ]
 
+# ETF fixtures (Step 4 Component 5).
+ETF_HOLDINGS_FIXTURE_ETF = "SPY"
+ETF_PRICES_FIXTURES = [
+    ("XLK", "2020-01-01", "2023-12-31"),
+]
+
+# Analyst fixtures (Step 4 Component 6).
+ANALYST_GRADES_FIXTURE = ("AAPL", "2018-01-01", "2024-12-31")
+ANALYST_TARGETS_FIXTURE_TICKERS = ["AAPL", "MSFT", "NVDA"]
+ANALYST_ESTIMATES_FIXTURE_TICKER = "AAPL"
+
 ATOL = 1e-9
 
 
@@ -171,6 +182,63 @@ def check_earnings(selection: set[str]) -> list[tuple[bool, str]]:
     return results
 
 
+def check_analyst(selection: set[str]) -> list[tuple[bool, str]]:
+    if "analyst" not in selection:
+        return []
+    from src.data.data_store import get_data_store
+    ds = get_data_store()
+    results = []
+
+    ticker, start, end = ANALYST_GRADES_FIXTURE
+    name = f"grades_{ticker}_{start[:4]}_{end[:4]}"
+    golden = pd.read_pickle(FIXTURE_DIR / f"{name}.pkl")
+    actual = ds.get_analyst_grades(ticker=ticker, start_date=start, end_date=end)
+    results.append(_compare(name, golden, actual,
+                            ["ticker", "date", "grading_company"]))
+
+    name = "price_targets_sample"
+    golden = pd.read_pickle(FIXTURE_DIR / f"{name}.pkl")
+    frames = [ds.get_price_target_consensus(ticker=t) for t in ANALYST_TARGETS_FIXTURE_TICKERS]
+    actual = pd.concat([f for f in frames if not f.empty], ignore_index=True) \
+        if any(not f.empty for f in frames) else pd.DataFrame()
+    if not actual.empty:
+        latest = actual["snapshot_date"].max()
+        actual = actual[actual["snapshot_date"] == latest].reset_index(drop=True)
+    results.append(_compare(name, golden, actual, ["ticker", "snapshot_date"]))
+
+    for period in ("quarter", "annual"):
+        name = f"estimates_{ANALYST_ESTIMATES_FIXTURE_TICKER}_{period}"
+        golden = pd.read_pickle(FIXTURE_DIR / f"{name}.pkl")
+        actual = ds.get_analyst_estimates(ticker=ANALYST_ESTIMATES_FIXTURE_TICKER, period=period)
+        results.append(_compare(name, golden, actual, ["ticker", "period", "date"]))
+    return results
+
+
+def check_etf(selection: set[str]) -> list[tuple[bool, str]]:
+    if "etf" not in selection:
+        return []
+    from src.data.data_store import get_data_store
+    from src.data.data_fetcher import fetch_price_data
+    ds = get_data_store()
+    results = []
+
+    name = f"etf_holdings_{ETF_HOLDINGS_FIXTURE_ETF}"
+    golden = pd.read_pickle(FIXTURE_DIR / f"{name}.pkl")
+    actual = ds.get_etf_holdings(etf_symbol=ETF_HOLDINGS_FIXTURE_ETF)
+    if not actual.empty:
+        latest = actual["snapshot_date"].max()
+        actual = actual[actual["snapshot_date"] == latest].reset_index(drop=True)
+    results.append(_compare(name, golden, actual,
+                            ["etf_symbol", "asset", "snapshot_date"]))
+
+    for etf, start, end in ETF_PRICES_FIXTURES:
+        name = f"etf_prices_{etf}"
+        golden = pd.read_pickle(FIXTURE_DIR / f"{name}.pkl")
+        actual = fetch_price_data([etf], start, end)
+        results.append(_compare(name, golden, actual, ["tic", "datadate"]))
+    return results
+
+
 def check_corporate_actions(selection: set[str]) -> list[tuple[bool, str]]:
     if "corporate_actions" not in selection:
         return []
@@ -216,7 +284,7 @@ def check_ownership(selection: set[str]) -> list[tuple[bool, str]]:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--only",
-                    default="sp500,prices,fundamentals,news,macro,earnings,ownership,corporate_actions",
+                    default="sp500,prices,fundamentals,news,macro,earnings,ownership,corporate_actions,etf,analyst",
                     help="comma-separated subset to verify")
     args = ap.parse_args()
     selection = set(s.strip() for s in args.only.split(",") if s.strip())
@@ -235,6 +303,8 @@ def main():
     all_results.extend(check_earnings(selection))
     all_results.extend(check_ownership(selection))
     all_results.extend(check_corporate_actions(selection))
+    all_results.extend(check_etf(selection))
+    all_results.extend(check_analyst(selection))
 
     print()
     for ok, msg in all_results:

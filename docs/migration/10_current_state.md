@@ -6,10 +6,10 @@ If it conflicts with an earlier migration doc (01-09), this doc is authoritative
 
 ## One-screen snapshot
 
-- **Data layer**: refactored; FMP topic modules + FRED/Yahoo macro/earnings/ownership/corporate_actions modules; single shared HTTP client with timeout + retry.
-- **DB**: SQLite at `data/cache/finrl_trading.db`. Contains 1.82M price rows, 22.9K quarterly fundamentals, 51.3K macro observations, 29.5K earnings rows, **1.80M insider-trading filings**, 619 shares_float snapshots, 21.1K dividends, 203 stock splits. Transcripts / SEC / 13F tables do not exist yet.
-- **Test infrastructure**: L3 **19/19** ✓, fixture equivalence **18/18** ✓.
-- **Step 4 build progress**: **4 of 10 components shipped** (`macro.py`, `earnings.py`, `ownership.py`, `corporate_actions.py`). Next: `etf.py`.
+- **Data layer**: refactored; FMP topic modules + FRED/Yahoo macro/earnings/ownership/corporate_actions/etf/analyst modules; single shared HTTP client with timeout + retry.
+- **DB**: SQLite at `data/cache/finrl_trading.db`. Contains 1.94M price rows (715 stocks + 46 ETFs), 22.9K quarterly fundamentals, 51.3K macro observations, 29.5K earnings rows, **1.80M insider-trading filings**, 619 shares_float snapshots, 21.1K dividends, 203 stock splits, 11.2K ETF holdings, **182.5K analyst grades**, 651 price-target snapshots, 41.5K analyst estimates. Transcripts / SEC / 13F tables do not exist yet.
+- **Test infrastructure**: L3 **21/21** ✓, fixture equivalence **24/24** ✓.
+- **Step 4 build progress**: **6 of 10 components shipped** (`macro.py`, `earnings.py`, `ownership.py`, `corporate_actions.py`, `etf.py`, `analyst.py`). Next: `filings.py`.
 - **Known blockers**: none. Known pre-existing quirks: listed in "Gotchas" below.
 
 ## DB state as of 2026-04-24
@@ -25,6 +25,11 @@ If it conflicts with an earlier migration doc (01-09), this doc is authoritative
 | `insider_trading_fetch_log` | 715 | 715 tickers | — | Component 3 pagination checkpoint |
 | `dividends` | 21,140 | 544 tickers | 2015-01-02 → 2026-05-11 | ✓ **Component 4 output** |
 | `stock_splits` | 203 | 155 tickers | 2015-01-02 → 2026-05-07 | ✓ **Component 4 output** |
+| `etf_holdings` | 11,233 | 36 ETFs / 5,556 distinct assets | 2023-04-17 → 2026-05-07 | ✓ **Component 5 Part A output** |
+| `price_data` (ETF subset) | 130,128 | 46 ETFs | 2015-01-02 → 2026-05-06 | ✓ **Component 5 Part B added** to existing table |
+| `analyst_grades` | 182,523 | 680 tickers | 2015-01-02 → 2026-05-07 | ✓ **Component 6 output** |
+| `price_target_consensus` | 651 | 651 tickers | 2026-05-07 → 2026-05-07 | ✓ **Component 6 output** (synthesized snapshot_date) |
+| `analyst_estimates` | 41,486 | 636 tickers / 16,578 annual + 24,908 quarter | 1993-12-30 → 2034-01-03 | ✓ **Component 6 output** (forward + historical) |
 | `raw_payloads` | 77,364 | 503 tickers | 2015-10-24 → 2025-09-30 | Cached FMP JSON for fundamentals |
 | `news_articles` | 60 | 3 tickers | 2024-08-28 → 2024-09-01 | Smoke-test data only; not yet bulk-pulled |
 | `sp500_components_details` | 4 | — | — | Point-in-time snapshots (survivorship-free source is the CSV) |
@@ -48,7 +53,9 @@ src/data/
     ├── macro.py (285)            — FRED + Yahoo series (Step 4 Component 1)
     ├── earnings.py (~230)        — FMP /earnings + /earnings-calendar (Step 4 Component 2)
     ├── ownership.py (~290)       — FMP /insider-trading/search + /shares-float (Step 4 Component 3)
-    └── corporate_actions.py (~230) — FMP /dividends + /splits (Step 4 Component 4)
+    ├── corporate_actions.py (~230) — FMP /dividends + /splits (Step 4 Component 4)
+    ├── etf.py (~210)             — FMP /etf/holdings + 46-ETF universe catalog (Step 4 Component 5)
+    └── analyst.py (~340)         — FMP /grades + /price-target-consensus + /analyst-estimates (Step 4 Component 6)
 ```
 
 Every module follows the same shape: module-level public functions, takes `client` + `data_store` as explicit args (except `macro.py` which has its own FRED/Yahoo clients since it's non-FMP).
@@ -69,6 +76,11 @@ All scripts under `scripts/`. Run from repo root with `PYTHONPATH=$(pwd)`.
 | `bulk_insider_trading.py` | ~140 | Paginated per-ticker; crash-safe via `insider_trading_fetch_log`. Auto-resumes from `last_page + 1` on re-run. `--no-resume` for full re-scan | Once to populate (~6h wall); periodic re-runs for new filings |
 | `bulk_dividends.py` | ~110 | One call per ticker; UNIQUE(ticker, date) for dedup. Default save scope 2015+. `--start` / `--tickers` overrides | Once to populate (~14 min); periodic re-runs to pick up new dividends |
 | `bulk_splits.py` | ~110 | Same shape as bulk_dividends; most tickers have 0-1 splits in scope | Once to populate (~14 min); rare re-runs |
+| `bulk_etf_holdings.py` | ~110 | One call per ETF in `ETF_UNIVERSE` (46 ETFs); accumulating snapshot history via UNIQUE(etf_symbol, asset, snapshot_date) | Once to populate (~1 min); weekly to track constituent drift |
+| `bulk_etf_prices.py` | ~110 | Reuses `fetch_price_data` for the 46 ETFs into existing `price_data` table; defensive collision-check vs. stock universe | Once to populate (~2 min); periodic for fresh prices |
+| `bulk_analyst_grades.py` | ~110 | One call per ticker — `/grades` returns all-history; UNIQUE(ticker, date, grading_company) dedup; default save scope 2015+ | Once to populate (~14 min); daily for new actions |
+| `bulk_price_targets.py` | ~110 | One call per ticker — singleton snapshot with synthesized snapshot_date; UNIQUE(ticker, snapshot_date) dedups same-day reruns | Weekly to track target revisions |
+| `bulk_analyst_estimates.py` | ~120 | Two calls per ticker (quarter + annual); UNIQUE(ticker, date, period); rows include both historical + forward periods | Once to populate (~28 min); after each earnings season |
 | `probe_fmp_endpoints.py` | 214 | Live probes for FMP endpoints (used to build the Step 4 inventory in 08_step4_endpoint_inventory.md) | As needed when adding new FMP endpoints |
 | `verify_fundamentals_db_crosscheck.py` | 87 | **Diagnostic only** (not a regression check) — compares fetcher output vs DB rows for AAPL/XOM/JPM. See its docstring for why they diverge. | Rarely — only if debugging post-processor drift |
 
@@ -77,8 +89,8 @@ Golden fixtures live in `tests/fixtures/` (10 `.pkl` files, ~500 KB total). Prob
 ### Expected suite output
 
 ```bash
-python scripts/verify_data_quality.py        # → 19/19 passed
-python scripts/verify_fixture_equivalence.py # → 18/18 passed
+python scripts/verify_data_quality.py        # → 21/21 passed
+python scripts/verify_fixture_equivalence.py # → 24/24 passed
 ```
 
 ## Completion log — what's been built
@@ -163,7 +175,35 @@ python scripts/verify_fixture_equivalence.py # → 18/18 passed
 - **First bulk run**: 21,140 dividends across 544 tickers (~75% of universe pays dividends), 203 splits across 155 tickers. AAPL 2020 4:1 split present and verified by L3.
 - **Bundle vs split**: kept as one module rather than `dividends.py` + `splits.py`. Both endpoints share fetch shape and bulk pattern; splitting would create 2 near-identical files. Module name `corporate_actions.py` keeps room for future related events (spinoffs, M&A) if ever added.
 
-## Step 4 remaining — 6 components
+### Step 4 Component 5 — `etf.py` + 46-ETF price backfill — done (2026-05-07)
+
+- New module `src/data/fetcher/etf.py` (~210 lines) with module-level `ETF_UNIVERSE` dict (46 entries: 11 sectors, 3 broad, 7 style, 7 bonds, 4 commodities, 2 international, 1 vol, 1 currency, 10 sub-sectors, plus SPY). Public API: `fetch_etf_holdings`, `fetch_all_etf_holdings`.
+- New table `etf_holdings` with `UNIQUE(etf_symbol, asset, snapshot_date)` — accumulating constituent history, snapshot_date derived from FMP's `updatedAt[:10]`.
+- 2 new `DataStore` methods (`save_etf_holdings`, `get_etf_holdings`) — `get_etf_holdings` supports reverse-lookup (`asset='AAPL'` → which ETFs hold it).
+- 2 new bulk scripts: `bulk_etf_holdings.py` (~1 min wall) + `bulk_etf_prices.py` (~2 min wall, reuses existing `fetch_price_data`).
+- L3 suite: 19 → 20 checks (`check_etf_coverage`).
+- Fixture suite: 18 → 20 fixtures (`etf_holdings_SPY` pinned to latest snapshot_date for stability + `etf_prices_XLK` 2020-2023 historical slice).
+- **Defense check**: `bulk_etf_prices.py` verifies `set(ETF_UNIVERSE) ∩ get_universe_tickers() == ∅` before running, refusing to start otherwise. Prevents accidental overwrite of equity prices.
+- **FMP coverage gap**: 10 of 46 ETFs return 0 holdings rows (AGG, GLD, HYG, IEF, LQD, SHY, SLV, TIP, TLT, USO — all bond/commodity ETFs whose constituents aren't equities and aren't exposed via `/etf/holdings`). Plus UUP/VXX/DBC are 1-2 asset funds by design. Equity-style ETFs (sectors, broad, style, sub-sectors) are fully covered — 33 ETFs with ≥20 holdings, totaling 11,233 rows. **L3 thresholds were relaxed from initial spec (≥40 ETFs / ≥30 holdings) to (≥25 / ≥20)** to reflect this reality without compromising the "do we have meaningful data?" check.
+- **First bulk run**: 11,233 holdings rows from 36 ETFs (snapshot dates ranging 2023-04-17 → 2026-05-07 — FMP's per-ETF refresh cadence varies). Price backfill: 130,128 rows across all 46 ETFs, 2015-01-02 → 2026-05-06.
+
+### Step 4 Component 6 — `analyst.py` — done (2026-05-07)
+
+- New module `src/data/fetcher/analyst.py` (~340 lines) bundling 3 FMP analyst endpoints. Public API: `fetch_analyst_grades`, `fetch_price_target_consensus`, `fetch_analyst_estimates`, plus 3 batch wrappers + `ESTIMATE_PERIODS`.
+- 3 new tables: `analyst_grades` (UNIQUE(ticker, date, grading_company)), `price_target_consensus` (UNIQUE(ticker, snapshot_date), accumulating via synthesized `snapshot_date = today`), `analyst_estimates` (UNIQUE(ticker, date, period); 22 numeric columns + 2 analyst counts).
+- 6 new `DataStore` methods: save/get for each table.
+- 3 new bulk scripts (separate cadences justify separation): `bulk_analyst_grades.py` (~14 min, daily), `bulk_price_targets.py` (~14 min, weekly), `bulk_analyst_estimates.py` (~28 min, after earnings seasons).
+- L3 suite: 20 → 21 checks (`check_analyst_coverage` — combined for all 3 tables: ≥400 grades-tickers, ≥500 targets-tickers, ≥500 estimates-tickers).
+- Fixture suite: 20 → 24 fixtures (`grades_AAPL_2018_2024` historical window, `price_targets_sample` 3-ticker snapshot pinned to latest snapshot_date, `estimates_AAPL_quarter`, `estimates_AAPL_annual`).
+- **Bulk wall time**: grades + targets ran in parallel (~14 min wall); estimates sequentially (~28 min). Total ~42 min, no FMP retry storms — analyst endpoints are well-behaved on the stable API.
+- **Schema notes**:
+  - `price_target_consensus` synthesizes `snapshot_date = today` (FMP returns no date); same accumulating pattern as `shares_float`.
+  - `analyst_estimates` returns BOTH historical and forward rows in a single call. Historical estimates (e.g. AAPL annual back to 1996) are real point-in-time consensus values worth keeping. UNIQUE(ticker, date, period) dedups across re-runs; INSERT OR REPLACE refreshes if FMP revises.
+  - The `period` column distinguishes quarter/annual rows in one table — cleaner than two parallel tables for identical 22-column schemas.
+- **First bulk run**: 182,523 grades across 680 tickers (2015-2026), 651 price-target snapshots (one per covered ticker), 41,486 estimates rows (16,578 annual + 24,908 quarter, range 1993-12-30 → 2034-01-03).
+- **Late fix**: forgot to add `analyst` to the `--only` default in `verify_fixture_equivalence.py` initially — fixture suite reported 20/20 instead of 24/24 until I added it. Quick one-line fix.
+
+## Step 4 remaining — 4 components
 
 Per the component-by-component execution agreed with the user (1 component → review → next). Overview lives in [09_step4_build_plan.md](./09_step4_build_plan.md). Detailed per-endpoint schemas live in [08_step4_endpoint_inventory.md](./08_step4_endpoint_inventory.md).
 
@@ -173,8 +213,8 @@ Per the component-by-component execution agreed with the user (1 component → r
 | 2 | `earnings.py` (calendar + per-ticker) | ✅ Done | Hybrid source strategy: per-ticker for history, global for forward window |
 | 3 | `ownership.py` (insider + shares_float) | ✅ Done | First Class C paginated module; per-ticker `insider_trading_fetch_log` for crash-safe resume |
 | 4 | `corporate_actions.py` (dividends + splits) | ✅ Done | Bundled module; 21K dividends + 203 splits |
-| 5 | `etf.py` (holdings) + ETF price backfill | — | unblocks sector-rotation features |
-| 6 | `analyst.py` (grades + targets + estimates) | — | three endpoints in one module |
+| 5 | `etf.py` (holdings) + ETF price backfill | ✅ Done | 11K holdings (36 ETFs) + 130K ETF prices (46 ETFs); 10 bond/commodity ETFs lack FMP holdings coverage |
+| 6 | `analyst.py` (grades + targets + estimates) | ✅ Done | 182K grades + 651 target snapshots + 41K estimates; 3 separate bulk scripts for different cadences |
 | 7 | `filings.py` (SEC) | — | paginated; requires `from`/`to` date params |
 | 8 | `transcripts.py` | — | long background pull: 42,529 transcripts ~ 12-24h wall |
 | 9 | `institutional.py` (13F) | — | curate ~100-CIK seed list first; pull per-CIK for all quarters |
@@ -227,10 +267,10 @@ If you need more detail than this doc provides:
 | Current component plan (when in plan mode) | `~/.claude/plans/*.md` |
 | Git history of actual changes | `git log --oneline docs/migration/ src/data/fetcher/ scripts/` |
 
-## How to resume work on Component 5 (`etf.py`)
+## How to resume work on Component 7 (`filings.py`)
 
 1. Read this doc (you're here).
-2. Skim `docs/migration/08_step4_endpoint_inventory.md` row 12 for ETF-holdings schema; review the 46-ETF list in the same doc's footer.
-3. Ensure L3 + fixture suites pass (`19/19` and `18/18`).
+2. Skim `docs/migration/08_step4_endpoint_inventory.md` row 13 for SEC filings schema. Class C paginated — like insider trading.
+3. Ensure L3 + fixture suites pass (`21/21` and `24/24`).
 4. Trigger plan mode; Claude will run Phase 1 exploration then draft a new plan file in `~/.claude/plans/`.
-5. Review + approve plan, then execute. Component 5 also unblocks the 46 sector/broad ETF price backfills via existing `prices.py` (no new endpoint code needed for those — just universe addition).
+5. Review + approve plan, then execute. Class C paginated module — can reuse the `insider_trading_fetch_log` pattern from Component 3 for crash-safe resume.

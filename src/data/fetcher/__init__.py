@@ -71,6 +71,20 @@ from src.data.fetcher.corporate_actions import (
     fetch_all_dividends,
     fetch_all_splits,
 )
+from src.data.fetcher.etf import (
+    fetch_etf_holdings,
+    fetch_all_etf_holdings,
+    ETF_UNIVERSE,
+)
+from src.data.fetcher.analyst import (
+    fetch_analyst_grades,
+    fetch_price_target_consensus,
+    fetch_analyst_estimates,
+    fetch_all_analyst_grades,
+    fetch_all_price_targets,
+    fetch_all_analyst_estimates,
+    ESTIMATE_PERIODS,
+)
 from src.data.fetcher.universes import get_universe_tickers
 
 __all__ = [
@@ -115,4 +129,16 @@ __all__ = [
     "fetch_splits",
     "fetch_all_dividends",
     "fetch_all_splits",
+    # ETFs (Step 4 Component 5)
+    "fetch_etf_holdings",
+    "fetch_all_etf_holdings",
+    "ETF_UNIVERSE",
+    # analyst (Step 4 Component 6)
+    "fetch_analyst_grades",
+    "fetch_price_target_consensus",
+    "fetch_analyst_estimates",
+    "fetch_all_analyst_grades",
+    "fetch_all_price_targets",
+    "fetch_all_analyst_estimates",
+    "ESTIMATE_PERIODS",
 ]

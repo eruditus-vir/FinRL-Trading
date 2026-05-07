@@ -367,6 +367,102 @@ class DataStore:
                     ON stock_splits(ticker, date)
             ''')
 
+            # ETF holdings — accumulating snapshot history. snapshot_date is
+            # FMP's updatedAt[:10] so multiple same-day calls dedup but
+            # FMP-refresh boundaries produce new rows. Added 2026-05-07 in
+            # Step 4 Component 5.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS etf_holdings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    etf_symbol TEXT NOT NULL,
+                    asset TEXT NOT NULL,
+                    snapshot_date TEXT NOT NULL,
+                    name TEXT,
+                    isin TEXT,
+                    security_cusip TEXT,
+                    shares_number REAL,
+                    weight_percentage REAL,
+                    market_value REAL,
+                    updated_at TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(etf_symbol, asset, snapshot_date)
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_etf_holdings_etf_date
+                    ON etf_holdings(etf_symbol, snapshot_date)
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_etf_holdings_asset
+                    ON etf_holdings(asset)
+            ''')
+
+            # Analyst grades — historical upgrades/downgrades, all-history per
+            # ticker. Added 2026-05-07 in Step 4 Component 6.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS analyst_grades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    grading_company TEXT,
+                    previous_grade TEXT,
+                    new_grade TEXT,
+                    action TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(ticker, date, grading_company)
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_analyst_grades_ticker_date
+                    ON analyst_grades(ticker, date)
+            ''')
+
+            # Price target consensus — singleton snapshot per ticker.
+            # snapshot_date is synthesized at fetch time so weekly re-runs
+            # build a target-revision history.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS price_target_consensus (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL,
+                    snapshot_date TEXT NOT NULL,
+                    target_high REAL,
+                    target_low REAL,
+                    target_consensus REAL,
+                    target_median REAL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(ticker, snapshot_date)
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_price_target_ticker_date
+                    ON price_target_consensus(ticker, snapshot_date)
+            ''')
+
+            # Analyst estimates — forward-looking quarterly + annual. period
+            # column distinguishes the two; UNIQUE(ticker, date, period).
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS analyst_estimates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    period TEXT NOT NULL,
+                    revenue_low REAL, revenue_high REAL, revenue_avg REAL,
+                    ebitda_low REAL, ebitda_high REAL, ebitda_avg REAL,
+                    ebit_low REAL, ebit_high REAL, ebit_avg REAL,
+                    net_income_low REAL, net_income_high REAL, net_income_avg REAL,
+                    sga_low REAL, sga_high REAL, sga_avg REAL,
+                    eps_low REAL, eps_high REAL, eps_avg REAL,
+                    num_analysts_revenue INTEGER,
+                    num_analysts_eps INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(ticker, date, period)
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_analyst_estimates_ticker_date
+                    ON analyst_estimates(ticker, date)
+            ''')
+
             conn.commit()
             logger.info(f"Initialized database at {self.db_path}")
 
@@ -1747,6 +1843,307 @@ class DataStore:
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         sql = (f"SELECT ticker, date, numerator, denominator, split_type "
                f"FROM stock_splits {where} ORDER BY ticker, date")
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql(sql, conn, params=params)
+
+    # ── ETF holdings ─────────────────────────────────────────────────────
+
+    def save_etf_holdings(self, df: pd.DataFrame) -> int:
+        """Upsert ETF-holdings rows. Idempotent via
+        UNIQUE(etf_symbol, asset, snapshot_date)."""
+        if df is None or len(df) == 0:
+            return 0
+
+        def _num(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        def _text(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            return str(v)
+
+        rows = []
+        for _, r in df.iterrows():
+            if not r.get('etf_symbol') or not r.get('asset') or not r.get('snapshot_date'):
+                continue
+            rows.append((
+                str(r['etf_symbol']),
+                str(r['asset']),
+                str(r['snapshot_date'])[:10],
+                _text(r.get('name')),
+                _text(r.get('isin')),
+                _text(r.get('security_cusip')),
+                _num(r.get('shares_number')),
+                _num(r.get('weight_percentage')),
+                _num(r.get('market_value')),
+                _text(r.get('updated_at')),
+            ))
+
+        if not rows:
+            return 0
+
+        affected = 0
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            for row in rows:
+                try:
+                    cursor.execute(
+                        '''INSERT OR REPLACE INTO etf_holdings
+                           (etf_symbol, asset, snapshot_date, name, isin,
+                            security_cusip, shares_number, weight_percentage,
+                            market_value, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', row
+                    )
+                    affected += 1
+                except Exception as exc:
+                    logger.warning(f"Failed to save etf_holdings row {row[:3]}: {exc}")
+            conn.commit()
+        return affected
+
+    def get_etf_holdings(self, etf_symbol: str = None, asset: str = None,
+                         start_date: str = None, end_date: str = None) -> pd.DataFrame:
+        """Load etf_holdings rows. Filter by etf_symbol (e.g. 'SPY'), asset
+        (e.g. 'AAPL' for reverse lookup), and/or snapshot_date range."""
+        conditions, params = [], []
+        if etf_symbol:
+            conditions.append("etf_symbol = ?"); params.append(etf_symbol)
+        if asset:
+            conditions.append("asset = ?"); params.append(asset)
+        if start_date:
+            conditions.append("snapshot_date >= ?"); params.append(start_date)
+        if end_date:
+            conditions.append("snapshot_date <= ?"); params.append(end_date)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = (f"SELECT etf_symbol, asset, snapshot_date, name, isin, "
+               f"security_cusip, shares_number, weight_percentage, "
+               f"market_value, updated_at FROM etf_holdings {where} "
+               f"ORDER BY etf_symbol, snapshot_date, weight_percentage DESC")
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql(sql, conn, params=params)
+
+    # ── Analyst grades ───────────────────────────────────────────────────
+
+    def save_analyst_grades(self, df: pd.DataFrame) -> int:
+        """Upsert analyst-grade rows. Idempotent via
+        UNIQUE(ticker, date, grading_company)."""
+        if df is None or len(df) == 0:
+            return 0
+
+        def _text(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            return str(v)
+
+        rows = []
+        for _, r in df.iterrows():
+            if not r.get('ticker') or not r.get('date'):
+                continue
+            rows.append((
+                str(r['ticker']),
+                str(r['date'])[:10],
+                _text(r.get('grading_company')),
+                _text(r.get('previous_grade')),
+                _text(r.get('new_grade')),
+                _text(r.get('action')),
+            ))
+
+        if not rows:
+            return 0
+
+        affected = 0
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            for row in rows:
+                try:
+                    cursor.execute(
+                        '''INSERT OR REPLACE INTO analyst_grades
+                           (ticker, date, grading_company, previous_grade, new_grade, action)
+                           VALUES (?, ?, ?, ?, ?, ?)''', row
+                    )
+                    affected += 1
+                except Exception as exc:
+                    logger.warning(f"Failed to save analyst_grades row {row[:3]}: {exc}")
+            conn.commit()
+        return affected
+
+    def get_analyst_grades(self, ticker: str = None,
+                          start_date: str = None, end_date: str = None) -> pd.DataFrame:
+        """Load analyst_grades rows."""
+        conditions, params = [], []
+        if ticker:
+            conditions.append("ticker = ?"); params.append(ticker)
+        if start_date:
+            conditions.append("date >= ?"); params.append(start_date)
+        if end_date:
+            conditions.append("date <= ?"); params.append(end_date)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = (f"SELECT ticker, date, grading_company, previous_grade, new_grade, action "
+               f"FROM analyst_grades {where} ORDER BY ticker, date DESC")
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql(sql, conn, params=params)
+
+    # ── Price target consensus ───────────────────────────────────────────
+
+    def save_price_target_consensus(self, df: pd.DataFrame) -> int:
+        """Upsert price-target rows. Idempotent via UNIQUE(ticker, snapshot_date)."""
+        if df is None or len(df) == 0:
+            return 0
+
+        def _num(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        rows = []
+        for _, r in df.iterrows():
+            if not r.get('ticker') or not r.get('snapshot_date'):
+                continue
+            rows.append((
+                str(r['ticker']),
+                str(r['snapshot_date'])[:10],
+                _num(r.get('target_high')),
+                _num(r.get('target_low')),
+                _num(r.get('target_consensus')),
+                _num(r.get('target_median')),
+            ))
+
+        if not rows:
+            return 0
+
+        affected = 0
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            for row in rows:
+                try:
+                    cursor.execute(
+                        '''INSERT OR REPLACE INTO price_target_consensus
+                           (ticker, snapshot_date, target_high, target_low,
+                            target_consensus, target_median)
+                           VALUES (?, ?, ?, ?, ?, ?)''', row
+                    )
+                    affected += 1
+                except Exception as exc:
+                    logger.warning(f"Failed to save price_target row {row[:2]}: {exc}")
+            conn.commit()
+        return affected
+
+    def get_price_target_consensus(self, ticker: str = None,
+                                   start_date: str = None,
+                                   end_date: str = None) -> pd.DataFrame:
+        """Load price_target_consensus rows."""
+        conditions, params = [], []
+        if ticker:
+            conditions.append("ticker = ?"); params.append(ticker)
+        if start_date:
+            conditions.append("snapshot_date >= ?"); params.append(start_date)
+        if end_date:
+            conditions.append("snapshot_date <= ?"); params.append(end_date)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = (f"SELECT ticker, snapshot_date, target_high, target_low, "
+               f"target_consensus, target_median FROM price_target_consensus "
+               f"{where} ORDER BY ticker, snapshot_date")
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql(sql, conn, params=params)
+
+    # ── Analyst estimates ────────────────────────────────────────────────
+
+    def save_analyst_estimates(self, df: pd.DataFrame) -> int:
+        """Upsert analyst_estimates rows. Idempotent via
+        UNIQUE(ticker, date, period)."""
+        if df is None or len(df) == 0:
+            return 0
+
+        def _num(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        def _int(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+
+        cols = ['ticker', 'date', 'period',
+                'revenue_low', 'revenue_high', 'revenue_avg',
+                'ebitda_low', 'ebitda_high', 'ebitda_avg',
+                'ebit_low', 'ebit_high', 'ebit_avg',
+                'net_income_low', 'net_income_high', 'net_income_avg',
+                'sga_low', 'sga_high', 'sga_avg',
+                'eps_low', 'eps_high', 'eps_avg',
+                'num_analysts_revenue', 'num_analysts_eps']
+
+        rows = []
+        for _, r in df.iterrows():
+            if not r.get('ticker') or not r.get('date') or not r.get('period'):
+                continue
+            rows.append((
+                str(r['ticker']), str(r['date'])[:10], str(r['period']),
+                _num(r.get('revenue_low')), _num(r.get('revenue_high')), _num(r.get('revenue_avg')),
+                _num(r.get('ebitda_low')), _num(r.get('ebitda_high')), _num(r.get('ebitda_avg')),
+                _num(r.get('ebit_low')), _num(r.get('ebit_high')), _num(r.get('ebit_avg')),
+                _num(r.get('net_income_low')), _num(r.get('net_income_high')), _num(r.get('net_income_avg')),
+                _num(r.get('sga_low')), _num(r.get('sga_high')), _num(r.get('sga_avg')),
+                _num(r.get('eps_low')), _num(r.get('eps_high')), _num(r.get('eps_avg')),
+                _int(r.get('num_analysts_revenue')), _int(r.get('num_analysts_eps')),
+            ))
+
+        if not rows:
+            return 0
+
+        affected = 0
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            placeholders = ','.join(['?'] * len(cols))
+            sql = f"INSERT OR REPLACE INTO analyst_estimates ({','.join(cols)}) VALUES ({placeholders})"
+            for row in rows:
+                try:
+                    cursor.execute(sql, row)
+                    affected += 1
+                except Exception as exc:
+                    logger.warning(f"Failed to save analyst_estimates row {row[:3]}: {exc}")
+            conn.commit()
+        return affected
+
+    def get_analyst_estimates(self, ticker: str = None, period: str = None,
+                              start_date: str = None,
+                              end_date: str = None) -> pd.DataFrame:
+        """Load analyst_estimates rows. Filter by ticker, period
+        ('quarter' | 'annual'), and/or date range."""
+        conditions, params = [], []
+        if ticker:
+            conditions.append("ticker = ?"); params.append(ticker)
+        if period:
+            conditions.append("period = ?"); params.append(period)
+        if start_date:
+            conditions.append("date >= ?"); params.append(start_date)
+        if end_date:
+            conditions.append("date <= ?"); params.append(end_date)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = (
+            f"SELECT ticker, date, period, "
+            f"revenue_low, revenue_high, revenue_avg, "
+            f"ebitda_low, ebitda_high, ebitda_avg, "
+            f"ebit_low, ebit_high, ebit_avg, "
+            f"net_income_low, net_income_high, net_income_avg, "
+            f"sga_low, sga_high, sga_avg, "
+            f"eps_low, eps_high, eps_avg, "
+            f"num_analysts_revenue, num_analysts_eps "
+            f"FROM analyst_estimates {where} ORDER BY ticker, period, date"
+        )
         with sqlite3.connect(self.db_path) as conn:
             return pd.read_sql(sql, conn, params=params)
 

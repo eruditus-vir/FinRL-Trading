@@ -41,6 +41,16 @@ from src.data.fetcher import (
     fetch_splits,
     fetch_all_dividends,
     fetch_all_splits,
+    fetch_etf_holdings,
+    fetch_all_etf_holdings,
+    ETF_UNIVERSE,
+    fetch_analyst_grades,
+    fetch_price_target_consensus,
+    fetch_analyst_estimates,
+    fetch_all_analyst_grades,
+    fetch_all_price_targets,
+    fetch_all_analyst_estimates,
+    ESTIMATE_PERIODS,
 )
 
 __all__ = [
@@ -77,4 +87,14 @@ __all__ = [
     "fetch_splits",
     "fetch_all_dividends",
     "fetch_all_splits",
+    "fetch_etf_holdings",
+    "fetch_all_etf_holdings",
+    "ETF_UNIVERSE",
+    "fetch_analyst_grades",
+    "fetch_price_target_consensus",
+    "fetch_analyst_estimates",
+    "fetch_all_analyst_grades",
+    "fetch_all_price_targets",
+    "fetch_all_analyst_estimates",
+    "ESTIMATE_PERIODS",
 ]

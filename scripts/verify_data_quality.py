@@ -426,6 +426,96 @@ def check_corporate_actions_coverage(conn):
                f"splits: {split_cov} tickers / {split_total} rows")
 
 
+def check_etf_coverage(conn):
+    """etf_holdings: ≥25 ETFs with ≥20 holdings, weight_percentage in [0, 100].
+    Threshold relaxed from initial spec (≥40/≥30) because FMP's /etf/holdings
+    doesn't expose constituents for bond/commodity/currency/volatility ETFs
+    (AGG, GLD, HYG, IEF, LQD, SHY, SLV, TIP, TLT, USO return 0 rows; UUP/VXX/DBC
+    are 1-2 asset funds by design). Coverage of equity-style ETFs (sectors,
+    broad-market, style factors, sub-sectors) is what matters here.
+
+    price_data ETF subset: ≥40 of 46 ETFs with ≥2000 trading days."""
+    if not conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='etf_holdings'"
+    ).fetchone():
+        return _fail("etf_holdings table is missing")
+
+    etf_cov = conn.execute("""
+        SELECT COUNT(*) FROM (
+            SELECT etf_symbol FROM etf_holdings
+            GROUP BY etf_symbol HAVING COUNT(*) >= 20
+        )
+    """).fetchone()[0]
+    if etf_cov < 25:
+        return _fail(f"only {etf_cov} ETFs have ≥20 holdings (expected ≥25)")
+
+    bad_weight = conn.execute(
+        "SELECT COUNT(*) FROM etf_holdings "
+        "WHERE weight_percentage < 0 OR weight_percentage > 100"
+    ).fetchone()[0]
+    if bad_weight > 0:
+        return _fail(f"{bad_weight} rows with weight_percentage outside [0, 100]")
+
+    from src.data.fetcher.etf import ETF_UNIVERSE
+    placeholders = ','.join(['?'] * len(ETF_UNIVERSE))
+    px_cov = conn.execute(
+        f"""SELECT COUNT(*) FROM (
+            SELECT ticker FROM price_data
+            WHERE ticker IN ({placeholders})
+            GROUP BY ticker HAVING COUNT(*) >= 2000
+        )""", list(ETF_UNIVERSE.keys())
+    ).fetchone()[0]
+    if px_cov < 40:
+        return _fail(f"only {px_cov} of {len(ETF_UNIVERSE)} ETFs have ≥2000 price rows")
+
+    total = conn.execute("SELECT COUNT(*) FROM etf_holdings").fetchone()[0]
+    return _ok(f"etf_holdings: {etf_cov} ETFs / {total:,} rows; "
+               f"prices: {px_cov}/{len(ETF_UNIVERSE)} ETFs covered")
+
+
+def check_analyst_coverage(conn):
+    """analyst_grades: ≥400 tickers with ≥5 grades each.
+    price_target_consensus: ≥500 tickers with target_consensus > 0.
+    analyst_estimates: ≥500 tickers with ≥4 rows (mix of quarter+annual)."""
+    for name in ('analyst_grades', 'price_target_consensus', 'analyst_estimates'):
+        if not conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone():
+            return _fail(f"{name} table is missing")
+
+    grades_cov = conn.execute("""
+        SELECT COUNT(*) FROM (
+            SELECT ticker FROM analyst_grades
+            GROUP BY ticker HAVING COUNT(*) >= 5
+        )
+    """).fetchone()[0]
+    if grades_cov < 400:
+        return _fail(f"only {grades_cov} tickers have ≥5 analyst grades (expected ≥400)")
+
+    targets_cov = conn.execute(
+        "SELECT COUNT(DISTINCT ticker) FROM price_target_consensus "
+        "WHERE target_consensus > 0"
+    ).fetchone()[0]
+    if targets_cov < 500:
+        return _fail(f"only {targets_cov} tickers have positive target_consensus (expected ≥500)")
+
+    estimates_cov = conn.execute("""
+        SELECT COUNT(*) FROM (
+            SELECT ticker FROM analyst_estimates
+            GROUP BY ticker HAVING COUNT(*) >= 4
+        )
+    """).fetchone()[0]
+    if estimates_cov < 500:
+        return _fail(f"only {estimates_cov} tickers have ≥4 estimate rows (expected ≥500)")
+
+    g = conn.execute("SELECT COUNT(*) FROM analyst_grades").fetchone()[0]
+    t = conn.execute("SELECT COUNT(*) FROM price_target_consensus").fetchone()[0]
+    e = conn.execute("SELECT COUNT(*) FROM analyst_estimates").fetchone()[0]
+    return _ok(f"grades: {grades_cov} tickers / {g:,}; "
+               f"targets: {targets_cov} / {t:,}; "
+               f"estimates: {estimates_cov} / {e:,}")
+
+
 def check_merged_tickers_no_prices(conn):
     """BXLT, PCL, RHT, SNI, TWC have fundamentals but no prices (merged out; FMP dropped them)."""
     expected_zero = ["BXLT", "PCL", "RHT", "SNI", "TWC"]
@@ -484,6 +574,10 @@ ALL_CHECKS = [
     Check("ownership_coverage",                   check_ownership_coverage),
     # corporate actions (Step 4 Component 4)
     Check("corporate_actions_coverage",           check_corporate_actions_coverage),
+    # ETFs (Step 4 Component 5)
+    Check("etf_coverage",                         check_etf_coverage),
+    # analyst (Step 4 Component 6)
+    Check("analyst_coverage",                     check_analyst_coverage),
     # known exceptions
     Check("merged_tickers_have_no_prices",        check_merged_tickers_no_prices),
     Check("mon_ticker_reuse_still_present",       check_mon_ticker_reuse),
