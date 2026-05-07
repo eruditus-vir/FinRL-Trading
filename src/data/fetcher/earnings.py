@@ -65,13 +65,9 @@ def _get_client(client=None, data_store=None):
 
 
 def _universe_tickers(ds) -> set:
-    """Distinct tickers in fundamental_data — our backfill universe."""
-    import sqlite3
-    with sqlite3.connect(ds.db_path) as conn:
-        rows = conn.execute(
-            "SELECT DISTINCT ticker FROM fundamental_data"
-        ).fetchall()
-    return {r[0] for r in rows}
+    """Backwards-compat shim — use `get_universe_tickers` from universes module."""
+    from src.data.fetcher.universes import get_universe_tickers
+    return get_universe_tickers(ds)
 
 
 def _normalize_records(records: Iterable[dict]) -> pd.DataFrame:

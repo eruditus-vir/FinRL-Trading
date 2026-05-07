@@ -6,10 +6,10 @@ If it conflicts with an earlier migration doc (01-09), this doc is authoritative
 
 ## One-screen snapshot
 
-- **Data layer**: refactored; FMP topic modules + FRED/Yahoo macro module + earnings module; single shared HTTP client with timeout + retry.
-- **DB**: SQLite at `data/cache/finrl_trading.db` (482 MB). Contains 1.82M price rows, 22.9K quarterly fundamentals, 51.3K macro observations, 29.4K earnings rows. News table exists but essentially empty. Transcripts / insider / SEC / 13F tables do not exist yet.
-- **Test infrastructure**: two regression suites (L3 data quality + fixture equivalence). Both green: 17/17 and 13/13.
-- **Step 4 build progress**: **2 of 10 components shipped** (`macro.py`, `earnings.py`). Next: `ownership.py`.
+- **Data layer**: refactored; FMP topic modules + FRED/Yahoo macro/earnings/ownership/corporate_actions modules; single shared HTTP client with timeout + retry.
+- **DB**: SQLite at `data/cache/finrl_trading.db`. Contains 1.82M price rows, 22.9K quarterly fundamentals, 51.3K macro observations, 29.5K earnings rows, **1.80M insider-trading filings**, 619 shares_float snapshots, 21.1K dividends, 203 stock splits. Transcripts / SEC / 13F tables do not exist yet.
+- **Test infrastructure**: L3 **19/19** ✓, fixture equivalence **18/18** ✓.
+- **Step 4 build progress**: **4 of 10 components shipped** (`macro.py`, `earnings.py`, `ownership.py`, `corporate_actions.py`). Next: `etf.py`.
 - **Known blockers**: none. Known pre-existing quirks: listed in "Gotchas" below.
 
 ## DB state as of 2026-04-24
@@ -20,6 +20,11 @@ If it conflicts with an earlier migration doc (01-09), this doc is authoritative
 | `fundamental_data` | 22,909 | 715 tickers | 2015-06-30 → 2026-03-31 | ✓ Healthy |
 | `macro_series` | 51,269 | 32 series (24 FRED + 8 Yahoo) | 2015-01-01 → 2026-04-23 | ✓ **Component 1 output** |
 | `earnings_calendar` | 29,515 | 687 tickers (133 rows FMP_CALENDAR, rest FMP_EARNINGS) | 2015-01-03 → 2027-01-27 | ✓ **Component 2 output** |
+| `insider_trading` | 1,802,939 | 668 tickers (≥10 filings) / 672 distinct | 2003-05-05 → 2026-04-27 | ✓ **Component 3 output** |
+| `shares_float` | 619 | 619 tickers | 2021-10-04 → 2026-04-28 | ✓ **Component 3 output** |
+| `insider_trading_fetch_log` | 715 | 715 tickers | — | Component 3 pagination checkpoint |
+| `dividends` | 21,140 | 544 tickers | 2015-01-02 → 2026-05-11 | ✓ **Component 4 output** |
+| `stock_splits` | 203 | 155 tickers | 2015-01-02 → 2026-05-07 | ✓ **Component 4 output** |
 | `raw_payloads` | 77,364 | 503 tickers | 2015-10-24 → 2025-09-30 | Cached FMP JSON for fundamentals |
 | `news_articles` | 60 | 3 tickers | 2024-08-28 → 2024-09-01 | Smoke-test data only; not yet bulk-pulled |
 | `sp500_components_details` | 4 | — | — | Point-in-time snapshots (survivorship-free source is the CSV) |
@@ -41,7 +46,9 @@ src/data/
     ├── news.py (248)             — news + optional GPT sentiment helpers
     ├── realtime.py (42)          — quote + batch-quote + actively-trading-list
     ├── macro.py (285)            — FRED + Yahoo series (Step 4 Component 1)
-    └── earnings.py (~230)        — FMP /earnings + /earnings-calendar (Step 4 Component 2)
+    ├── earnings.py (~230)        — FMP /earnings + /earnings-calendar (Step 4 Component 2)
+    ├── ownership.py (~290)       — FMP /insider-trading/search + /shares-float (Step 4 Component 3)
+    └── corporate_actions.py (~230) — FMP /dividends + /splits (Step 4 Component 4)
 ```
 
 Every module follows the same shape: module-level public functions, takes `client` + `data_store` as explicit args (except `macro.py` which has its own FRED/Yahoo clients since it's non-FMP).
@@ -58,6 +65,10 @@ All scripts under `scripts/`. Run from repo root with `PYTHONPATH=$(pwd)`.
 | `bulk_macro.py` | 123 | Incremental + resumable pull of all 32 default FRED/Yahoo series | Once to populate; re-run anytime (idempotent) |
 | `bulk_earnings_per_ticker.py` | ~130 | Per-ticker `/earnings` pull for DISTINCT tickers in fundamental_data (~715) | Once to populate; re-run to refresh upcoming-announcement actuals (~13 min) |
 | `bulk_earnings_calendar.py` | ~130 | Global `/earnings-calendar` forward window (today..today+90d by default), universe-filtered | As needed for upcoming-announcements watch |
+| `bulk_shares_float.py` | ~110 | One-shot per ticker; accumulates snapshots via UNIQUE(ticker, snapshot_date) | Once to populate; weekly/monthly to track dilution |
+| `bulk_insider_trading.py` | ~140 | Paginated per-ticker; crash-safe via `insider_trading_fetch_log`. Auto-resumes from `last_page + 1` on re-run. `--no-resume` for full re-scan | Once to populate (~6h wall); periodic re-runs for new filings |
+| `bulk_dividends.py` | ~110 | One call per ticker; UNIQUE(ticker, date) for dedup. Default save scope 2015+. `--start` / `--tickers` overrides | Once to populate (~14 min); periodic re-runs to pick up new dividends |
+| `bulk_splits.py` | ~110 | Same shape as bulk_dividends; most tickers have 0-1 splits in scope | Once to populate (~14 min); rare re-runs |
 | `probe_fmp_endpoints.py` | 214 | Live probes for FMP endpoints (used to build the Step 4 inventory in 08_step4_endpoint_inventory.md) | As needed when adding new FMP endpoints |
 | `verify_fundamentals_db_crosscheck.py` | 87 | **Diagnostic only** (not a regression check) — compares fetcher output vs DB rows for AAPL/XOM/JPM. See its docstring for why they diverge. | Rarely — only if debugging post-processor drift |
 
@@ -66,8 +77,8 @@ Golden fixtures live in `tests/fixtures/` (10 `.pkl` files, ~500 KB total). Prob
 ### Expected suite output
 
 ```bash
-python scripts/verify_data_quality.py        # → 17/17 passed
-python scripts/verify_fixture_equivalence.py # → 13/13 passed
+python scripts/verify_data_quality.py        # → 19/19 passed
+python scripts/verify_fixture_equivalence.py # → 18/18 passed
 ```
 
 ## Completion log — what's been built
@@ -126,7 +137,33 @@ python scripts/verify_fixture_equivalence.py # → 13/13 passed
 - **Design note on hybrid sources**: per-ticker endpoint is authoritative for historical (2015→now, estimates populated, clean S&P-500 scope). Global-calendar is for forward watch only; running it with `--from today` avoids overwriting historical per-ticker rows via the `UNIQUE(ticker, date)` constraint.
 - **Design note on incremental**: `fetch_earnings_per_ticker` does NOT skip based on DB freshness — it always makes the 1 API call and upserts. Rationale: upcoming-earnings rows need their actuals updated post-announcement, and FMP occasionally revises historical EPS; skipping creates a freshness gap for a zero-call saving.
 
-## Step 4 remaining — 8 components
+### Step 4 Component 3 — `ownership.py` — done (2026-04-26 → 2026-04-27)
+
+- New module `src/data/fetcher/ownership.py` (~290 lines) — first **Class C (paginated)** module in the fetcher. Public API: `fetch_insider_trading`, `fetch_insider_trading_page`, `fetch_shares_float`, `fetch_all_insider_trading`, `fetch_all_shares_float`.
+- 3 new tables: `insider_trading` (UNIQUE 5-col), `shares_float` (accumulating history via UNIQUE(ticker, snapshot_date)), `insider_trading_fetch_log` (per-ticker pagination checkpoint, crash-safe resume).
+- 5 new `DataStore` methods: save/get for both tables + `get_insider_fetch_progress` / `update_insider_fetch_progress`.
+- 2 new bulk scripts: `bulk_shares_float.py` (one-shot per ticker, ~4h wall in practice due to FMP retries) + `bulk_insider_trading.py` (paginated, resumable; estimated ~6h wall, 942K rows after first 410/715 tickers).
+- L3 suite: 17 → 18 checks (added `check_ownership_coverage` — asserts ≥400 tickers with ≥10 insider filings + ≥600 tickers with positive `float_shares`).
+- Fixture suite: 13 → 15 fixtures (`insider_AAPL_2022.pkl` historical window + `shares_float_sample.pkl` for AAPL/MSFT/NVDA).
+- **Refactor (scope-tight)**: promoted private `_universe_tickers` from `earnings.py` to public `get_universe_tickers` in `universes.py`. Updated 2 callers in `bulk_earnings_per_ticker.py` + `bulk_earnings_calendar.py`. `earnings.py` keeps a backwards-compat shim.
+- **Pagination + crash-resume design**: each successful page write updates the `insider_trading_fetch_log` checkpoint (`last_page`, `last_filing_date`). On re-run, `fetch_insider_trading` skips through `last_page + 1`. Empty-page sentinel records the "fully fetched" state so subsequent resume runs skip the ticker entirely until `--no-resume` is used.
+- **Why so slow**: FMP's `/insider-trading/search` runs ~25-100s per ticker (5-100+ pages × 1-2s/page). Apparent retries on rate-limit lengthen the wall further. shares_float (1 call/ticker) similarly took 4h vs. expected 15min — heavy 429 backoff.
+- **Bulk completed in two passes**: paused at 410/715 on 2026-04-26 to defer to overnight; resumed 2026-04-27 → 2026-04-28 to finish remaining 305. Final: 1,802,939 rows / 672 distinct tickers (668 with ≥10 filings).
+- **Late-discovered placeholder filter**: 5 shares_float rows had `float_shares = 0 or NULL` (delisted tickers like TWTR-taken-private-day, ABMD post-J&J, FB-renaming gotcha, SPLS, CAM). Added a save-time filter in `_normalize_shares_float` mirroring the earnings all-null pattern. Cleaned existing 5 rows; L3 flipped to 18/18.
+
+### Step 4 Component 4 — `corporate_actions.py` — done (2026-05-07)
+
+- New module `src/data/fetcher/corporate_actions.py` (~230 lines) — bundles `/dividends` + `/splits` (both trivial Class B, 1 call returns all-history). Public API: `fetch_dividends`, `fetch_splits`, `fetch_all_dividends`, `fetch_all_splits`.
+- 2 new tables: `dividends` (UNIQUE(ticker, date)) + `stock_splits` (UNIQUE(ticker, date)). Standard pattern, no fetch_log needed.
+- 4 new `DataStore` methods: `save_dividends`, `get_dividends`, `save_splits`, `get_splits`.
+- 2 new bulk scripts: `bulk_dividends.py` + `bulk_splits.py` (~14 min wall each, ran in parallel).
+- L3 suite: 18 → 19 checks (`check_corporate_actions_coverage` — ≥200 dividend tickers + sanity bounds, ≥10 split tickers).
+- Fixture suite: 15 → 18 fixtures (dividends_AAPL, dividends_KO 2018-2024 historical windows + splits_AAPL all-time).
+- **`yield` → `yield_pct` rename**: FMP returns the column as `yield` (Python keyword). Renamed at the normalizer layer to keep downstream code clean (`df.yield_pct` instead of forced `df["yield"]`). Single-line `_normalize_dividends` change.
+- **First bulk run**: 21,140 dividends across 544 tickers (~75% of universe pays dividends), 203 splits across 155 tickers. AAPL 2020 4:1 split present and verified by L3.
+- **Bundle vs split**: kept as one module rather than `dividends.py` + `splits.py`. Both endpoints share fetch shape and bulk pattern; splitting would create 2 near-identical files. Module name `corporate_actions.py` keeps room for future related events (spinoffs, M&A) if ever added.
+
+## Step 4 remaining — 6 components
 
 Per the component-by-component execution agreed with the user (1 component → review → next). Overview lives in [09_step4_build_plan.md](./09_step4_build_plan.md). Detailed per-endpoint schemas live in [08_step4_endpoint_inventory.md](./08_step4_endpoint_inventory.md).
 
@@ -134,8 +171,8 @@ Per the component-by-component execution agreed with the user (1 component → r
 |---|---|---|---|
 | 1 | `macro.py` (FRED + Yahoo) | ✅ Done | — |
 | 2 | `earnings.py` (calendar + per-ticker) | ✅ Done | Hybrid source strategy: per-ticker for history, global for forward window |
-| 3 | `ownership.py` (insider + shares_float) | Next | paginated — `insider-trading/search?page=N&limit=100` terminates when page returns <100 |
-| 4 | `corporate_actions.py` (dividends + splits) | — | trivial Class B (one call per ticker, all-history) |
+| 3 | `ownership.py` (insider + shares_float) | ✅ Done | First Class C paginated module; per-ticker `insider_trading_fetch_log` for crash-safe resume |
+| 4 | `corporate_actions.py` (dividends + splits) | ✅ Done | Bundled module; 21K dividends + 203 splits |
 | 5 | `etf.py` (holdings) + ETF price backfill | — | unblocks sector-rotation features |
 | 6 | `analyst.py` (grades + targets + estimates) | — | three endpoints in one module |
 | 7 | `filings.py` (SEC) | — | paginated; requires `from`/`to` date params |
@@ -190,10 +227,10 @@ If you need more detail than this doc provides:
 | Current component plan (when in plan mode) | `~/.claude/plans/*.md` |
 | Git history of actual changes | `git log --oneline docs/migration/ src/data/fetcher/ scripts/` |
 
-## How to resume work on Component 3 (`ownership.py`)
+## How to resume work on Component 5 (`etf.py`)
 
 1. Read this doc (you're here).
-2. Skim `docs/migration/08_step4_endpoint_inventory.md` rows 9-10 for insider-trading + shares-float endpoint schemas.
-3. Ensure L3 + fixture suites pass (`17/17` and `13/13`).
+2. Skim `docs/migration/08_step4_endpoint_inventory.md` row 12 for ETF-holdings schema; review the 46-ETF list in the same doc's footer.
+3. Ensure L3 + fixture suites pass (`19/19` and `18/18`).
 4. Trigger plan mode; Claude will run Phase 1 exploration then draft a new plan file in `~/.claude/plans/`.
-5. Review + approve plan, then execute.
+5. Review + approve plan, then execute. Component 5 also unblocks the 46 sector/broad ETF price backfills via existing `prices.py` (no new endpoint code needed for those — just universe addition).

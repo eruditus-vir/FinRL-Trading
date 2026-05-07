@@ -31,6 +31,16 @@ from src.data.fetcher import (
     fetch_all_earnings,
     EARNINGS_PER_TICKER_SOURCE,
     EARNINGS_CALENDAR_SOURCE,
+    fetch_insider_trading,
+    fetch_insider_trading_page,
+    fetch_shares_float,
+    fetch_all_insider_trading,
+    fetch_all_shares_float,
+    get_universe_tickers,
+    fetch_dividends,
+    fetch_splits,
+    fetch_all_dividends,
+    fetch_all_splits,
 )
 
 __all__ = [
@@ -57,4 +67,14 @@ __all__ = [
     "fetch_all_earnings",
     "EARNINGS_PER_TICKER_SOURCE",
     "EARNINGS_CALENDAR_SOURCE",
+    "fetch_insider_trading",
+    "fetch_insider_trading_page",
+    "fetch_shares_float",
+    "fetch_all_insider_trading",
+    "fetch_all_shares_float",
+    "get_universe_tickers",
+    "fetch_dividends",
+    "fetch_splits",
+    "fetch_all_dividends",
+    "fetch_all_splits",
 ]

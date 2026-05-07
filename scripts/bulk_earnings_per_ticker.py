@@ -51,8 +51,9 @@ def main() -> int:
     logging.basicConfig(level=logging.WARNING, format='%(levelname)s %(name)s: %(message)s')
 
     from src.data.fetcher.earnings import (
-        fetch_earnings_per_ticker, PER_TICKER_SOURCE, _universe_tickers,
+        fetch_earnings_per_ticker, PER_TICKER_SOURCE,
     )
+    from src.data.fetcher.universes import get_universe_tickers
     from src.data.fetcher.client import FMPClient
     from src.data.data_store import get_data_store
     from src.config.settings import get_config
@@ -62,7 +63,7 @@ def main() -> int:
     if args.tickers:
         tickers = sorted({t.strip() for t in args.tickers.split(",") if t.strip()})
     else:
-        tickers = sorted(_universe_tickers(ds))
+        tickers = sorted(get_universe_tickers(ds))
 
     if not tickers:
         _log("No tickers to fetch. Ensure fundamental_data is populated, or pass --tickers.")

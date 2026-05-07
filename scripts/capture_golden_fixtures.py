@@ -53,6 +53,23 @@ EARNINGS_FIXTURES = [
     ("NVDA", "2020-01-01", "2023-12-31"),
 ]
 
+# Ownership (Step 4 Component 3): historical insider window for AAPL +
+# multi-ticker shares_float snapshot. Both read from DB (post-bulk).
+INSIDER_FIXTURES = [
+    ("AAPL", "2022-01-01", "2022-12-31"),
+]
+SHARES_FLOAT_TICKERS = ["AAPL", "MSFT", "NVDA"]
+
+# Corporate actions (Step 4 Component 4): historical windows for 2 dividend
+# tickers + AAPL splits. Stable historical data — no upcoming-event drift.
+DIVIDEND_FIXTURES = [
+    ("AAPL", "2018-01-01", "2024-12-31"),
+    ("KO",   "2018-01-01", "2024-12-31"),
+]
+SPLIT_FIXTURES = [
+    ("AAPL", "2015-01-01", "2024-12-31"),
+]
+
 
 def _log(msg: str) -> None:
     print(f"[capture] {msg}", flush=True)
@@ -129,6 +146,48 @@ def capture_earnings() -> None:
         _log(f"  rows={len(df):,} cols={len(df.columns)}  {time.time()-t0:.1f}s")
 
 
+def capture_ownership() -> None:
+    """Insider trading window + shares_float snapshot per ticker."""
+    from src.data.data_store import get_data_store
+    ds = get_data_store()
+    for ticker, start, end in INSIDER_FIXTURES:
+        path = FIXTURE_DIR / f"insider_{ticker}_{start[:4]}.pkl"
+        t0 = time.time()
+        _log(f"insider {ticker} {start}..{end} → {path.name} ...")
+        df = ds.get_insider_trading(ticker=ticker, start_date=start, end_date=end)
+        df.to_pickle(path)
+        _log(f"  rows={len(df):,} cols={len(df.columns)}  {time.time()-t0:.1f}s")
+
+    path = FIXTURE_DIR / "shares_float_sample.pkl"
+    t0 = time.time()
+    _log(f"shares_float sample {SHARES_FLOAT_TICKERS} → {path.name} ...")
+    frames = [ds.get_shares_float(ticker=t) for t in SHARES_FLOAT_TICKERS]
+    df = pd.concat([f for f in frames if not f.empty], ignore_index=True) \
+        if any(not f.empty for f in frames) else pd.DataFrame()
+    df.to_pickle(path)
+    _log(f"  rows={len(df):,} cols={len(df.columns)}  {time.time()-t0:.1f}s")
+
+
+def capture_corporate_actions() -> None:
+    """Dividend + split historical windows."""
+    from src.data.data_store import get_data_store
+    ds = get_data_store()
+    for ticker, start, end in DIVIDEND_FIXTURES:
+        path = FIXTURE_DIR / f"dividends_{ticker}.pkl"
+        t0 = time.time()
+        _log(f"dividends {ticker} {start}..{end} → {path.name} ...")
+        df = ds.get_dividends(ticker=ticker, start_date=start, end_date=end)
+        df.to_pickle(path)
+        _log(f"  rows={len(df):,} cols={len(df.columns)}  {time.time()-t0:.1f}s")
+    for ticker, start, end in SPLIT_FIXTURES:
+        path = FIXTURE_DIR / f"splits_{ticker}.pkl"
+        t0 = time.time()
+        _log(f"splits {ticker} {start}..{end} → {path.name} ...")
+        df = ds.get_splits(ticker=ticker, start_date=start, end_date=end)
+        df.to_pickle(path)
+        _log(f"  rows={len(df):,} cols={len(df.columns)}  {time.time()-t0:.1f}s")
+
+
 def capture_sp500() -> None:
     from src.data.data_fetcher import fetch_sp500_tickers
     path = FIXTURE_DIR / "sp500.pkl"
@@ -160,6 +219,8 @@ def main():
     capture_news()
     capture_macro()
     capture_earnings()
+    capture_ownership()
+    capture_corporate_actions()
 
     _log("DONE. Fixtures in " + str(FIXTURE_DIR))
     for p in sorted(FIXTURE_DIR.glob("*.pkl")):

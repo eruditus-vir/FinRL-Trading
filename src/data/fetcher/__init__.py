@@ -58,6 +58,20 @@ from src.data.fetcher.earnings import (
     PER_TICKER_SOURCE as EARNINGS_PER_TICKER_SOURCE,
     CALENDAR_SOURCE as EARNINGS_CALENDAR_SOURCE,
 )
+from src.data.fetcher.ownership import (
+    fetch_insider_trading,
+    fetch_insider_trading_page,
+    fetch_shares_float,
+    fetch_all_insider_trading,
+    fetch_all_shares_float,
+)
+from src.data.fetcher.corporate_actions import (
+    fetch_dividends,
+    fetch_splits,
+    fetch_all_dividends,
+    fetch_all_splits,
+)
+from src.data.fetcher.universes import get_universe_tickers
 
 __all__ = [
     # base
@@ -89,4 +103,16 @@ __all__ = [
     "fetch_all_earnings",
     "EARNINGS_PER_TICKER_SOURCE",
     "EARNINGS_CALENDAR_SOURCE",
+    # ownership (Step 4 Component 3)
+    "fetch_insider_trading",
+    "fetch_insider_trading_page",
+    "fetch_shares_float",
+    "fetch_all_insider_trading",
+    "fetch_all_shares_float",
+    "get_universe_tickers",
+    # corporate actions (Step 4 Component 4)
+    "fetch_dividends",
+    "fetch_splits",
+    "fetch_all_dividends",
+    "fetch_all_splits",
 ]

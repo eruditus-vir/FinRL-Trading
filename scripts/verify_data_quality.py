@@ -352,6 +352,80 @@ def check_earnings_coverage(conn):
     return _ok(f"{coverage} tickers with ≥4 earnings rows ({total:,} total rows)")
 
 
+def check_ownership_coverage(conn):
+    """insider_trading: ≥400 tickers with ≥10 filings each.
+    shares_float: ≥600 tickers with positive float_shares; no NULL/zero float."""
+    for name in ('insider_trading', 'shares_float'):
+        if not conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone():
+            return _fail(f"{name} table is missing")
+
+    insider_cov = conn.execute("""
+        SELECT COUNT(*) FROM (
+            SELECT ticker FROM insider_trading
+            GROUP BY ticker HAVING COUNT(*) >= 10
+        )
+    """).fetchone()[0]
+    if insider_cov < 400:
+        return _fail(f"only {insider_cov} tickers have ≥10 insider filings (expected ≥400)")
+
+    float_cov = conn.execute(
+        "SELECT COUNT(DISTINCT ticker) FROM shares_float WHERE float_shares > 0"
+    ).fetchone()[0]
+    if float_cov < 600:
+        return _fail(f"only {float_cov} tickers have positive float_shares (expected ≥600)")
+
+    bad_float = conn.execute(
+        "SELECT COUNT(*) FROM shares_float WHERE float_shares IS NULL OR float_shares <= 0"
+    ).fetchone()[0]
+    if bad_float > 0:
+        return _fail(f"{bad_float} shares_float rows have NULL or non-positive float_shares")
+
+    total_i = conn.execute("SELECT COUNT(*) FROM insider_trading").fetchone()[0]
+    total_f = conn.execute("SELECT COUNT(*) FROM shares_float").fetchone()[0]
+    return _ok(f"insider: {insider_cov} tickers / {total_i:,} filings; "
+               f"shares_float: {float_cov} tickers / {total_f} snapshots")
+
+
+def check_corporate_actions_coverage(conn):
+    """dividends: ≥200 tickers with ≥1 dividend, all dividend in (0, 1000].
+    stock_splits: ≥10 tickers with ≥1 split, numerator/denominator both > 0."""
+    for name in ('dividends', 'stock_splits'):
+        if not conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone():
+            return _fail(f"{name} table is missing")
+
+    div_cov = conn.execute("SELECT COUNT(DISTINCT ticker) FROM dividends").fetchone()[0]
+    if div_cov < 200:
+        return _fail(f"only {div_cov} tickers have dividends (expected ≥200)")
+
+    bad_div = conn.execute(
+        "SELECT COUNT(*) FROM dividends "
+        "WHERE dividend IS NULL OR dividend <= 0 OR dividend > 1000"
+    ).fetchone()[0]
+    if bad_div > 0:
+        return _fail(f"{bad_div} dividend rows with invalid amount (NULL/<=0/>1000)")
+
+    split_cov = conn.execute("SELECT COUNT(DISTINCT ticker) FROM stock_splits").fetchone()[0]
+    if split_cov < 10:
+        return _fail(f"only {split_cov} tickers have splits (expected ≥10)")
+
+    bad_split = conn.execute(
+        "SELECT COUNT(*) FROM stock_splits "
+        "WHERE numerator IS NULL OR denominator IS NULL "
+        "OR numerator <= 0 OR denominator <= 0"
+    ).fetchone()[0]
+    if bad_split > 0:
+        return _fail(f"{bad_split} split rows with invalid ratio")
+
+    div_total = conn.execute("SELECT COUNT(*) FROM dividends").fetchone()[0]
+    split_total = conn.execute("SELECT COUNT(*) FROM stock_splits").fetchone()[0]
+    return _ok(f"dividends: {div_cov} tickers / {div_total:,} rows; "
+               f"splits: {split_cov} tickers / {split_total} rows")
+
+
 def check_merged_tickers_no_prices(conn):
     """BXLT, PCL, RHT, SNI, TWC have fundamentals but no prices (merged out; FMP dropped them)."""
     expected_zero = ["BXLT", "PCL", "RHT", "SNI", "TWC"]
@@ -406,6 +480,10 @@ ALL_CHECKS = [
     Check("macro_coverage",                       check_macro_coverage),
     # earnings (Step 4 Component 2)
     Check("earnings_coverage",                    check_earnings_coverage),
+    # ownership (Step 4 Component 3)
+    Check("ownership_coverage",                   check_ownership_coverage),
+    # corporate actions (Step 4 Component 4)
+    Check("corporate_actions_coverage",           check_corporate_actions_coverage),
     # known exceptions
     Check("merged_tickers_have_no_prices",        check_merged_tickers_no_prices),
     Check("mon_ticker_reuse_still_present",       check_mon_ticker_reuse),

@@ -46,6 +46,21 @@ EARNINGS_FIXTURES = [
     ("NVDA", "2020-01-01", "2023-12-31"),
 ]
 
+# Ownership fixtures (Step 4 Component 3) — mirror capture_golden_fixtures.py.
+INSIDER_FIXTURES = [
+    ("AAPL", "2022-01-01", "2022-12-31"),
+]
+SHARES_FLOAT_TICKERS = ["AAPL", "MSFT", "NVDA"]
+
+# Corporate actions fixtures (Step 4 Component 4) — mirror capture_golden_fixtures.py.
+DIVIDEND_FIXTURES = [
+    ("AAPL", "2018-01-01", "2024-12-31"),
+    ("KO",   "2018-01-01", "2024-12-31"),
+]
+SPLIT_FIXTURES = [
+    ("AAPL", "2015-01-01", "2024-12-31"),
+]
+
 ATOL = 1e-9
 
 
@@ -156,9 +171,52 @@ def check_earnings(selection: set[str]) -> list[tuple[bool, str]]:
     return results
 
 
+def check_corporate_actions(selection: set[str]) -> list[tuple[bool, str]]:
+    if "corporate_actions" not in selection:
+        return []
+    from src.data.data_store import get_data_store
+    ds = get_data_store()
+    results = []
+    for ticker, start, end in DIVIDEND_FIXTURES:
+        name = f"dividends_{ticker}"
+        golden = pd.read_pickle(FIXTURE_DIR / f"{name}.pkl")
+        actual = ds.get_dividends(ticker=ticker, start_date=start, end_date=end)
+        results.append(_compare(name, golden, actual, ["ticker", "date"]))
+    for ticker, start, end in SPLIT_FIXTURES:
+        name = f"splits_{ticker}"
+        golden = pd.read_pickle(FIXTURE_DIR / f"{name}.pkl")
+        actual = ds.get_splits(ticker=ticker, start_date=start, end_date=end)
+        results.append(_compare(name, golden, actual, ["ticker", "date"]))
+    return results
+
+
+def check_ownership(selection: set[str]) -> list[tuple[bool, str]]:
+    if "ownership" not in selection:
+        return []
+    from src.data.data_store import get_data_store
+    ds = get_data_store()
+    results = []
+    for ticker, start, end in INSIDER_FIXTURES:
+        name = f"insider_{ticker}_{start[:4]}"
+        golden = pd.read_pickle(FIXTURE_DIR / f"{name}.pkl")
+        actual = ds.get_insider_trading(ticker=ticker, start_date=start, end_date=end)
+        results.append(_compare(name, golden, actual,
+                                ["ticker", "filing_date", "reporting_cik",
+                                 "transaction_type", "securities_transacted"]))
+
+    name = "shares_float_sample"
+    golden = pd.read_pickle(FIXTURE_DIR / f"{name}.pkl")
+    frames = [ds.get_shares_float(ticker=t) for t in SHARES_FLOAT_TICKERS]
+    actual = pd.concat([f for f in frames if not f.empty], ignore_index=True) \
+        if any(not f.empty for f in frames) else pd.DataFrame()
+    results.append(_compare(name, golden, actual, ["ticker", "snapshot_date"]))
+    return results
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--only", default="sp500,prices,fundamentals,news,macro,earnings",
+    ap.add_argument("--only",
+                    default="sp500,prices,fundamentals,news,macro,earnings,ownership,corporate_actions",
                     help="comma-separated subset to verify")
     args = ap.parse_args()
     selection = set(s.strip() for s in args.only.split(",") if s.strip())
@@ -175,6 +233,8 @@ def main():
     all_results.extend(check_news(selection))
     all_results.extend(check_macro(selection))
     all_results.extend(check_earnings(selection))
+    all_results.extend(check_ownership(selection))
+    all_results.extend(check_corporate_actions(selection))
 
     print()
     for ok, msg in all_results:

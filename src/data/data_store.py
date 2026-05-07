@@ -260,6 +260,113 @@ class DataStore:
                     ON earnings_calendar(date)
             ''')
 
+            # Insider trading — paginated `/insider-trading/search` per ticker.
+            # 5-column UNIQUE handles same-date filings by the same insider for
+            # different transaction types/quantities. Added 2026-04-26 in Step 4
+            # Component 3.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS insider_trading (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL,
+                    filing_date TEXT NOT NULL,
+                    transaction_date TEXT,
+                    reporting_cik TEXT,
+                    company_cik TEXT,
+                    transaction_type TEXT,
+                    securities_owned REAL,
+                    securities_transacted REAL,
+                    price REAL,
+                    reporting_name TEXT,
+                    type_of_owner TEXT,
+                    acquisition_or_disposition TEXT,
+                    direct_or_indirect TEXT,
+                    form_type TEXT,
+                    security_name TEXT,
+                    url TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(company_cik, filing_date, reporting_cik,
+                           transaction_type, securities_transacted)
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_insider_ticker_date
+                    ON insider_trading(ticker, filing_date)
+            ''')
+
+            # Shares float — accumulating snapshot history. UNIQUE(ticker, date)
+            # so daily/weekly re-runs build a dilution timeline. snapshot_date
+            # is normalized to YYYY-MM-DD (FMP returns datetime).
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS shares_float (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL,
+                    snapshot_date TEXT NOT NULL,
+                    free_float REAL,
+                    float_shares REAL,
+                    outstanding_shares REAL,
+                    source TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(ticker, snapshot_date)
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_shares_float_ticker_date
+                    ON shares_float(ticker, snapshot_date)
+            ''')
+
+            # Insider-trading fetch log — per-ticker pagination checkpoint for
+            # crash-safe resume. Updated after each successful page write.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS insider_trading_fetch_log (
+                    ticker TEXT PRIMARY KEY,
+                    last_page INTEGER DEFAULT 0,
+                    last_filing_date TEXT,
+                    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Dividends — 1 call/ticker returns all-history. UNIQUE(ticker, date)
+            # on ex-dividend date. `yield_pct` renamed from FMP's `yield`
+            # (Python keyword). Added 2026-05-07 in Step 4 Component 4.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS dividends (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    record_date TEXT,
+                    payment_date TEXT,
+                    declaration_date TEXT,
+                    adj_dividend REAL,
+                    dividend REAL,
+                    yield_pct REAL,
+                    frequency TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(ticker, date)
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_dividends_ticker_date
+                    ON dividends(ticker, date)
+            ''')
+
+            # Stock splits — 1 call/ticker returns all-history.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS stock_splits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    numerator INTEGER,
+                    denominator INTEGER,
+                    split_type TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(ticker, date)
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_stock_splits_ticker_date
+                    ON stock_splits(ticker, date)
+            ''')
+
             conn.commit()
             logger.info(f"Initialized database at {self.db_path}")
 
@@ -1317,6 +1424,331 @@ class DataStore:
                 )
             row = cursor.fetchone()
             return row[0] if row else None
+
+    # ── Insider trading ──────────────────────────────────────────────────
+
+    def save_insider_trading(self, df: pd.DataFrame) -> int:
+        """Upsert insider-trading rows. Idempotent via UNIQUE(company_cik,
+        filing_date, reporting_cik, transaction_type, securities_transacted)."""
+        if df is None or len(df) == 0:
+            return 0
+
+        def _num(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        def _text(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            return str(v)
+
+        cols = ['ticker', 'filing_date', 'transaction_date',
+                'reporting_cik', 'company_cik', 'transaction_type',
+                'securities_owned', 'securities_transacted', 'price',
+                'reporting_name', 'type_of_owner',
+                'acquisition_or_disposition', 'direct_or_indirect',
+                'form_type', 'security_name', 'url']
+
+        rows = []
+        for _, r in df.iterrows():
+            if not r.get('ticker') or not r.get('filing_date'):
+                continue
+            rows.append((
+                str(r['ticker']),
+                str(r['filing_date'])[:10],
+                _text(r.get('transaction_date'))[:10] if r.get('transaction_date') else None,
+                _text(r.get('reporting_cik')),
+                _text(r.get('company_cik')),
+                _text(r.get('transaction_type')),
+                _num(r.get('securities_owned')),
+                _num(r.get('securities_transacted')),
+                _num(r.get('price')),
+                _text(r.get('reporting_name')),
+                _text(r.get('type_of_owner')),
+                _text(r.get('acquisition_or_disposition')),
+                _text(r.get('direct_or_indirect')),
+                _text(r.get('form_type')),
+                _text(r.get('security_name')),
+                _text(r.get('url')),
+            ))
+
+        if not rows:
+            return 0
+
+        affected = 0
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            placeholders = ','.join(['?'] * len(cols))
+            sql = f"INSERT OR REPLACE INTO insider_trading ({','.join(cols)}) VALUES ({placeholders})"
+            for row in rows:
+                try:
+                    cursor.execute(sql, row)
+                    affected += 1
+                except Exception as exc:
+                    logger.warning(f"Failed to save insider row {row[:3]}: {exc}")
+            conn.commit()
+        return affected
+
+    def get_insider_trading(self, ticker: str = None,
+                            start_date: str = None, end_date: str = None) -> pd.DataFrame:
+        """Load insider-trading rows. All filters optional."""
+        conditions, params = [], []
+        if ticker:
+            conditions.append("ticker = ?"); params.append(ticker)
+        if start_date:
+            conditions.append("filing_date >= ?"); params.append(start_date)
+        if end_date:
+            conditions.append("filing_date <= ?"); params.append(end_date)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = (f"SELECT ticker, filing_date, transaction_date, reporting_cik, "
+               f"company_cik, transaction_type, securities_owned, "
+               f"securities_transacted, price, reporting_name, type_of_owner, "
+               f"acquisition_or_disposition, direct_or_indirect, form_type, "
+               f"security_name, url FROM insider_trading {where} "
+               f"ORDER BY ticker, filing_date DESC")
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql(sql, conn, params=params)
+
+    def get_insider_fetch_progress(self, ticker: str) -> Optional[dict]:
+        """Return {'last_page': N, 'last_filing_date': str} or None if no prior fetch."""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                '''SELECT last_page, last_filing_date FROM insider_trading_fetch_log
+                   WHERE ticker = ?''', (ticker,)
+            ).fetchone()
+            if row is None:
+                return None
+            return {"last_page": row[0], "last_filing_date": row[1]}
+
+    def update_insider_fetch_progress(self, ticker: str, last_page: int,
+                                      last_filing_date: Optional[str]) -> None:
+        """Upsert pagination progress for a ticker."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                '''INSERT INTO insider_trading_fetch_log
+                   (ticker, last_page, last_filing_date, fetched_at)
+                   VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(ticker) DO UPDATE SET
+                       last_page = excluded.last_page,
+                       last_filing_date = excluded.last_filing_date,
+                       fetched_at = CURRENT_TIMESTAMP''',
+                (ticker, last_page, last_filing_date)
+            )
+            conn.commit()
+
+    # ── Shares float ─────────────────────────────────────────────────────
+
+    def save_shares_float(self, df: pd.DataFrame) -> int:
+        """Upsert shares_float rows. Idempotent via UNIQUE(ticker, snapshot_date)."""
+        if df is None or len(df) == 0:
+            return 0
+
+        def _num(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        def _text(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            return str(v)
+
+        rows = []
+        for _, r in df.iterrows():
+            if not r.get('ticker') or not r.get('snapshot_date'):
+                continue
+            rows.append((
+                str(r['ticker']),
+                str(r['snapshot_date'])[:10],
+                _num(r.get('free_float')),
+                _num(r.get('float_shares')),
+                _num(r.get('outstanding_shares')),
+                _text(r.get('source')),
+            ))
+
+        if not rows:
+            return 0
+
+        affected = 0
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            for row in rows:
+                try:
+                    cursor.execute(
+                        '''INSERT OR REPLACE INTO shares_float
+                           (ticker, snapshot_date, free_float, float_shares,
+                            outstanding_shares, source)
+                           VALUES (?, ?, ?, ?, ?, ?)''', row
+                    )
+                    affected += 1
+                except Exception as exc:
+                    logger.warning(f"Failed to save shares_float row {row[:2]}: {exc}")
+            conn.commit()
+        return affected
+
+    def get_shares_float(self, ticker: str = None,
+                         start_date: str = None, end_date: str = None) -> pd.DataFrame:
+        """Load shares_float rows. All filters optional."""
+        conditions, params = [], []
+        if ticker:
+            conditions.append("ticker = ?"); params.append(ticker)
+        if start_date:
+            conditions.append("snapshot_date >= ?"); params.append(start_date)
+        if end_date:
+            conditions.append("snapshot_date <= ?"); params.append(end_date)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = (f"SELECT ticker, snapshot_date, free_float, float_shares, "
+               f"outstanding_shares, source FROM shares_float {where} "
+               f"ORDER BY ticker, snapshot_date")
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql(sql, conn, params=params)
+
+    # ── Dividends ────────────────────────────────────────────────────────
+
+    def save_dividends(self, df: pd.DataFrame) -> int:
+        """Upsert dividend rows. Idempotent via UNIQUE(ticker, date)."""
+        if df is None or len(df) == 0:
+            return 0
+
+        def _num(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        def _text(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            return str(v)
+
+        rows = []
+        for _, r in df.iterrows():
+            if not r.get('ticker') or not r.get('date'):
+                continue
+            rows.append((
+                str(r['ticker']),
+                str(r['date'])[:10],
+                _text(r.get('record_date'))[:10] if r.get('record_date') else None,
+                _text(r.get('payment_date'))[:10] if r.get('payment_date') else None,
+                _text(r.get('declaration_date'))[:10] if r.get('declaration_date') else None,
+                _num(r.get('adj_dividend')),
+                _num(r.get('dividend')),
+                _num(r.get('yield_pct')),
+                _text(r.get('frequency')),
+            ))
+
+        if not rows:
+            return 0
+
+        affected = 0
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            for row in rows:
+                try:
+                    cursor.execute(
+                        '''INSERT OR REPLACE INTO dividends
+                           (ticker, date, record_date, payment_date, declaration_date,
+                            adj_dividend, dividend, yield_pct, frequency)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''', row
+                    )
+                    affected += 1
+                except Exception as exc:
+                    logger.warning(f"Failed to save dividend row {row[:2]}: {exc}")
+            conn.commit()
+        return affected
+
+    def get_dividends(self, ticker: str = None,
+                      start_date: str = None, end_date: str = None) -> pd.DataFrame:
+        """Load dividend rows. All filters optional."""
+        conditions, params = [], []
+        if ticker:
+            conditions.append("ticker = ?"); params.append(ticker)
+        if start_date:
+            conditions.append("date >= ?"); params.append(start_date)
+        if end_date:
+            conditions.append("date <= ?"); params.append(end_date)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = (f"SELECT ticker, date, record_date, payment_date, declaration_date, "
+               f"adj_dividend, dividend, yield_pct, frequency "
+               f"FROM dividends {where} ORDER BY ticker, date")
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql(sql, conn, params=params)
+
+    # ── Stock splits ─────────────────────────────────────────────────────
+
+    def save_splits(self, df: pd.DataFrame) -> int:
+        """Upsert split rows. Idempotent via UNIQUE(ticker, date)."""
+        if df is None or len(df) == 0:
+            return 0
+
+        def _int(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+
+        def _text(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            return str(v)
+
+        rows = []
+        for _, r in df.iterrows():
+            if not r.get('ticker') or not r.get('date'):
+                continue
+            rows.append((
+                str(r['ticker']),
+                str(r['date'])[:10],
+                _int(r.get('numerator')),
+                _int(r.get('denominator')),
+                _text(r.get('split_type')),
+            ))
+
+        if not rows:
+            return 0
+
+        affected = 0
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            for row in rows:
+                try:
+                    cursor.execute(
+                        '''INSERT OR REPLACE INTO stock_splits
+                           (ticker, date, numerator, denominator, split_type)
+                           VALUES (?, ?, ?, ?, ?)''', row
+                    )
+                    affected += 1
+                except Exception as exc:
+                    logger.warning(f"Failed to save split row {row[:2]}: {exc}")
+            conn.commit()
+        return affected
+
+    def get_splits(self, ticker: str = None,
+                   start_date: str = None, end_date: str = None) -> pd.DataFrame:
+        """Load split rows. All filters optional."""
+        conditions, params = [], []
+        if ticker:
+            conditions.append("ticker = ?"); params.append(ticker)
+        if start_date:
+            conditions.append("date >= ?"); params.append(start_date)
+        if end_date:
+            conditions.append("date <= ?"); params.append(end_date)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = (f"SELECT ticker, date, numerator, denominator, split_type "
+               f"FROM stock_splits {where} ORDER BY ticker, date")
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql(sql, conn, params=params)
 
 
 # Global data store instance

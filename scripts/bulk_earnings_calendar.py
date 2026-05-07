@@ -62,14 +62,15 @@ def main() -> int:
     logging.basicConfig(level=logging.WARNING, format='%(levelname)s %(name)s: %(message)s')
 
     from src.data.fetcher.earnings import (
-        fetch_earnings_calendar, CALENDAR_SOURCE, _universe_tickers,
+        fetch_earnings_calendar, CALENDAR_SOURCE,
     )
+    from src.data.fetcher.universes import get_universe_tickers
     from src.data.fetcher.client import FMPClient
     from src.data.data_store import get_data_store
     from src.config.settings import get_config
 
     ds = get_data_store()
-    universe = _universe_tickers(ds)
+    universe = get_universe_tickers(ds)
     if not universe:
         _log("ERROR: fundamental_data is empty — can't determine universe. "
              "Run fundamentals backfill first, or pass your own filter.")

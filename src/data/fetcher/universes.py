@@ -13,6 +13,7 @@ here would ripple into the DB schema — preserved as-is for Step 3 scope.
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import datetime
 from typing import Optional
 
@@ -21,6 +22,21 @@ import pandas as pd
 from src.data.fetcher.client import FMPClient
 
 logger = logging.getLogger(__name__)
+
+
+def get_universe_tickers(data_store=None) -> set:
+    """Return DISTINCT tickers in fundamental_data — the canonical bulk-fetch
+    universe shared by every Step-4 component (earnings, ownership, dividends,
+    etc.). 715 S&P-500 survivorship-free symbols as of the post-Step-1 import.
+    """
+    if data_store is None:
+        from src.data.data_store import get_data_store
+        data_store = get_data_store()
+    with sqlite3.connect(data_store.db_path) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT ticker FROM fundamental_data"
+        ).fetchall()
+    return {r[0] for r in rows}
 
 
 def get_sp500_components(client: FMPClient, data_store, date: Optional[str] = None) -> pd.DataFrame:
