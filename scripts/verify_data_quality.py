@@ -516,6 +516,41 @@ def check_analyst_coverage(conn):
                f"estimates: {estimates_cov} / {e:,}")
 
 
+def check_sec_filings_coverage(conn):
+    """sec_filings: ≥500 tickers with ≥10 filings, all rows have non-NULL
+    filing_date and form_type, ≥30 distinct form types."""
+    if not conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='sec_filings'"
+    ).fetchone():
+        return _fail("sec_filings table is missing")
+
+    cov = conn.execute("""
+        SELECT COUNT(*) FROM (
+            SELECT ticker FROM sec_filings
+            GROUP BY ticker HAVING COUNT(*) >= 10
+        )
+    """).fetchone()[0]
+    if cov < 500:
+        return _fail(f"only {cov} tickers have ≥10 SEC filings (expected ≥500)")
+
+    bad_meta = conn.execute(
+        "SELECT COUNT(*) FROM sec_filings "
+        "WHERE filing_date IS NULL OR form_type IS NULL"
+    ).fetchone()[0]
+    if bad_meta > 0:
+        return _fail(f"{bad_meta} sec_filings rows have NULL filing_date/form_type")
+
+    form_diversity = conn.execute(
+        "SELECT COUNT(DISTINCT form_type) FROM sec_filings"
+    ).fetchone()[0]
+    if form_diversity < 30:
+        return _fail(f"only {form_diversity} distinct form types "
+                     f"(expected ≥30 — fetch may be partial)")
+
+    total = conn.execute("SELECT COUNT(*) FROM sec_filings").fetchone()[0]
+    return _ok(f"sec_filings: {cov} tickers / {total:,} rows / {form_diversity} form types")
+
+
 def check_merged_tickers_no_prices(conn):
     """BXLT, PCL, RHT, SNI, TWC have fundamentals but no prices (merged out; FMP dropped them)."""
     expected_zero = ["BXLT", "PCL", "RHT", "SNI", "TWC"]
@@ -578,6 +613,8 @@ ALL_CHECKS = [
     Check("etf_coverage",                         check_etf_coverage),
     # analyst (Step 4 Component 6)
     Check("analyst_coverage",                     check_analyst_coverage),
+    # SEC filings (Step 4 Component 7)
+    Check("sec_filings_coverage",                 check_sec_filings_coverage),
     # known exceptions
     Check("merged_tickers_have_no_prices",        check_merged_tickers_no_prices),
     Check("mon_ticker_reuse_still_present",       check_mon_ticker_reuse),

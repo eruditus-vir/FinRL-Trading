@@ -51,6 +51,9 @@ from src.data.fetcher import (
     fetch_all_price_targets,
     fetch_all_analyst_estimates,
     ESTIMATE_PERIODS,
+    fetch_sec_filings,
+    fetch_sec_filings_page,
+    fetch_all_sec_filings,
 )
 
 __all__ = [
@@ -97,4 +100,7 @@ __all__ = [
     "fetch_all_price_targets",
     "fetch_all_analyst_estimates",
     "ESTIMATE_PERIODS",
+    "fetch_sec_filings",
+    "fetch_sec_filings_page",
+    "fetch_all_sec_filings",
 ]

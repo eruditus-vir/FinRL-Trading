@@ -463,6 +463,44 @@ class DataStore:
                     ON analyst_estimates(ticker, date)
             ''')
 
+            # SEC filings — paginated per-ticker. UNIQUE 4-tuple uses
+            # accepted_date (full timestamp) to differentiate multiple same-
+            # day filings of the same form type by different officers.
+            # Added 2026-05-08 in Step 4 Component 7.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS sec_filings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL,
+                    cik TEXT,
+                    filing_date TEXT NOT NULL,
+                    accepted_date TEXT,
+                    form_type TEXT,
+                    link TEXT,
+                    final_link TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(ticker, filing_date, form_type, accepted_date)
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_sec_filings_ticker_date
+                    ON sec_filings(ticker, filing_date)
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_sec_filings_form_type
+                    ON sec_filings(form_type)
+            ''')
+
+            # SEC filings fetch log — per-ticker pagination checkpoint for
+            # crash-safe resume. Mirrors insider_trading_fetch_log.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS sec_filings_fetch_log (
+                    ticker TEXT PRIMARY KEY,
+                    last_page INTEGER DEFAULT 0,
+                    last_filing_date TEXT,
+                    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
             conn.commit()
             logger.info(f"Initialized database at {self.db_path}")
 
@@ -2117,6 +2155,99 @@ class DataStore:
                     logger.warning(f"Failed to save analyst_estimates row {row[:3]}: {exc}")
             conn.commit()
         return affected
+
+    # ── SEC filings ──────────────────────────────────────────────────────
+
+    def save_sec_filings(self, df: pd.DataFrame) -> int:
+        """Upsert SEC-filing rows. Idempotent via
+        UNIQUE(ticker, filing_date, form_type, accepted_date)."""
+        if df is None or len(df) == 0:
+            return 0
+
+        def _text(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            return str(v)
+
+        rows = []
+        for _, r in df.iterrows():
+            if not r.get('ticker') or not r.get('filing_date'):
+                continue
+            rows.append((
+                str(r['ticker']),
+                _text(r.get('cik')),
+                str(r['filing_date'])[:10],
+                _text(r.get('accepted_date')),
+                _text(r.get('form_type')),
+                _text(r.get('link')),
+                _text(r.get('final_link')),
+            ))
+
+        if not rows:
+            return 0
+
+        affected = 0
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            for row in rows:
+                try:
+                    cursor.execute(
+                        '''INSERT OR REPLACE INTO sec_filings
+                           (ticker, cik, filing_date, accepted_date, form_type, link, final_link)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)''', row
+                    )
+                    affected += 1
+                except Exception as exc:
+                    logger.warning(f"Failed to save sec_filings row {row[:3]}: {exc}")
+            conn.commit()
+        return affected
+
+    def get_sec_filings(self, ticker: str = None, form_type: str = None,
+                        start_date: str = None, end_date: str = None) -> pd.DataFrame:
+        """Load sec_filings rows. Filter by ticker, form_type
+        (e.g. '10-K' or '8-K'), and/or filing_date range."""
+        conditions, params = [], []
+        if ticker:
+            conditions.append("ticker = ?"); params.append(ticker)
+        if form_type:
+            conditions.append("form_type = ?"); params.append(form_type)
+        if start_date:
+            conditions.append("filing_date >= ?"); params.append(start_date)
+        if end_date:
+            conditions.append("filing_date <= ?"); params.append(end_date)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = (f"SELECT ticker, cik, filing_date, accepted_date, form_type, "
+               f"link, final_link FROM sec_filings {where} "
+               f"ORDER BY ticker, filing_date DESC")
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql(sql, conn, params=params)
+
+    def get_sec_fetch_progress(self, ticker: str) -> Optional[dict]:
+        """Return {'last_page': N, 'last_filing_date': str} or None if no prior fetch."""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                '''SELECT last_page, last_filing_date FROM sec_filings_fetch_log
+                   WHERE ticker = ?''', (ticker,)
+            ).fetchone()
+            if row is None:
+                return None
+            return {"last_page": row[0], "last_filing_date": row[1]}
+
+    def update_sec_fetch_progress(self, ticker: str, last_page: int,
+                                  last_filing_date: Optional[str]) -> None:
+        """Upsert pagination progress for a ticker."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                '''INSERT INTO sec_filings_fetch_log
+                   (ticker, last_page, last_filing_date, fetched_at)
+                   VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(ticker) DO UPDATE SET
+                       last_page = excluded.last_page,
+                       last_filing_date = excluded.last_filing_date,
+                       fetched_at = CURRENT_TIMESTAMP''',
+                (ticker, last_page, last_filing_date)
+            )
+            conn.commit()
 
     def get_analyst_estimates(self, ticker: str = None, period: str = None,
                               start_date: str = None,

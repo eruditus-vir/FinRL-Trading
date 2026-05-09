@@ -72,6 +72,10 @@ ANALYST_GRADES_FIXTURE = ("AAPL", "2018-01-01", "2024-12-31")
 ANALYST_TARGETS_FIXTURE_TICKERS = ["AAPL", "MSFT", "NVDA"]
 ANALYST_ESTIMATES_FIXTURE_TICKER = "AAPL"
 
+# SEC filings fixtures (Step 4 Component 7).
+SEC_FILINGS_AAPL_WINDOW = ("AAPL", "2024-01-01", "2024-12-31")
+SEC_FILINGS_AAPL_FORM4_WINDOW = ("AAPL", "4", "2023-01-01", "2023-12-31")
+
 ATOL = 1e-9
 
 
@@ -182,6 +186,30 @@ def check_earnings(selection: set[str]) -> list[tuple[bool, str]]:
     return results
 
 
+def check_filings(selection: set[str]) -> list[tuple[bool, str]]:
+    if "filings" not in selection:
+        return []
+    from src.data.data_store import get_data_store
+    ds = get_data_store()
+    results = []
+
+    ticker, start, end = SEC_FILINGS_AAPL_WINDOW
+    name = f"sec_filings_{ticker}_{start[:4]}"
+    golden = pd.read_pickle(FIXTURE_DIR / f"{name}.pkl")
+    actual = ds.get_sec_filings(ticker=ticker, start_date=start, end_date=end)
+    results.append(_compare(name, golden, actual,
+                            ["ticker", "filing_date", "form_type", "accepted_date"]))
+
+    ticker, form, start, end = SEC_FILINGS_AAPL_FORM4_WINDOW
+    name = f"sec_filings_{ticker}_form{form}_{start[:4]}"
+    golden = pd.read_pickle(FIXTURE_DIR / f"{name}.pkl")
+    actual = ds.get_sec_filings(ticker=ticker, form_type=form,
+                                start_date=start, end_date=end)
+    results.append(_compare(name, golden, actual,
+                            ["ticker", "filing_date", "form_type", "accepted_date"]))
+    return results
+
+
 def check_analyst(selection: set[str]) -> list[tuple[bool, str]]:
     if "analyst" not in selection:
         return []
@@ -284,7 +312,7 @@ def check_ownership(selection: set[str]) -> list[tuple[bool, str]]:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--only",
-                    default="sp500,prices,fundamentals,news,macro,earnings,ownership,corporate_actions,etf,analyst",
+                    default="sp500,prices,fundamentals,news,macro,earnings,ownership,corporate_actions,etf,analyst,filings",
                     help="comma-separated subset to verify")
     args = ap.parse_args()
     selection = set(s.strip() for s in args.only.split(",") if s.strip())
@@ -305,6 +333,7 @@ def main():
     all_results.extend(check_corporate_actions(selection))
     all_results.extend(check_etf(selection))
     all_results.extend(check_analyst(selection))
+    all_results.extend(check_filings(selection))
 
     print()
     for ok, msg in all_results:

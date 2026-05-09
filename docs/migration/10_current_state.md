@@ -6,10 +6,10 @@ If it conflicts with an earlier migration doc (01-09), this doc is authoritative
 
 ## One-screen snapshot
 
-- **Data layer**: refactored; FMP topic modules + FRED/Yahoo macro/earnings/ownership/corporate_actions/etf/analyst modules; single shared HTTP client with timeout + retry.
-- **DB**: SQLite at `data/cache/finrl_trading.db`. Contains 1.94M price rows (715 stocks + 46 ETFs), 22.9K quarterly fundamentals, 51.3K macro observations, 29.5K earnings rows, **1.80M insider-trading filings**, 619 shares_float snapshots, 21.1K dividends, 203 stock splits, 11.2K ETF holdings, **182.5K analyst grades**, 651 price-target snapshots, 41.5K analyst estimates. Transcripts / SEC / 13F tables do not exist yet.
-- **Test infrastructure**: L3 **21/21** ✓, fixture equivalence **24/24** ✓.
-- **Step 4 build progress**: **6 of 10 components shipped** (`macro.py`, `earnings.py`, `ownership.py`, `corporate_actions.py`, `etf.py`, `analyst.py`). Next: `filings.py`.
+- **Data layer**: refactored; FMP topic modules + FRED/Yahoo macro/earnings/ownership/corporate_actions/etf/analyst/filings modules; single shared HTTP client with timeout + retry.
+- **DB**: SQLite at `data/cache/finrl_trading.db`. Contains 1.94M price rows (715 stocks + 46 ETFs), 22.9K quarterly fundamentals, 51.3K macro observations, 29.5K earnings rows, **1.80M insider-trading filings**, 619 shares_float snapshots, 21.1K dividends, 203 stock splits, 11.2K ETF holdings, **182.5K analyst grades**, 651 price-target snapshots, 41.5K analyst estimates, **808K SEC filings**. Transcripts / 13F tables do not exist yet.
+- **Test infrastructure**: L3 **22/22** ✓, fixture equivalence **26/26** ✓.
+- **Step 4 build progress**: **7 of 10 components shipped** (`macro.py`, `earnings.py`, `ownership.py`, `corporate_actions.py`, `etf.py`, `analyst.py`, `filings.py`). Next: `transcripts.py`.
 - **Known blockers**: none. Known pre-existing quirks: listed in "Gotchas" below.
 
 ## DB state as of 2026-04-24
@@ -30,6 +30,8 @@ If it conflicts with an earlier migration doc (01-09), this doc is authoritative
 | `analyst_grades` | 182,523 | 680 tickers | 2015-01-02 → 2026-05-07 | ✓ **Component 6 output** |
 | `price_target_consensus` | 651 | 651 tickers | 2026-05-07 → 2026-05-07 | ✓ **Component 6 output** (synthesized snapshot_date) |
 | `analyst_estimates` | 41,486 | 636 tickers / 16,578 annual + 24,908 quarter | 1993-12-30 → 2034-01-03 | ✓ **Component 6 output** (forward + historical) |
+| `sec_filings` | 808,130 | 675 tickers / 182 form types | 2009-01-15 → 2026-05-07 | ✓ **Component 7 output** |
+| `sec_filings_fetch_log` | 715 | 715 tickers | — | Component 7 pagination checkpoint |
 | `raw_payloads` | 77,364 | 503 tickers | 2015-10-24 → 2025-09-30 | Cached FMP JSON for fundamentals |
 | `news_articles` | 60 | 3 tickers | 2024-08-28 → 2024-09-01 | Smoke-test data only; not yet bulk-pulled |
 | `sp500_components_details` | 4 | — | — | Point-in-time snapshots (survivorship-free source is the CSV) |
@@ -55,7 +57,8 @@ src/data/
     ├── ownership.py (~290)       — FMP /insider-trading/search + /shares-float (Step 4 Component 3)
     ├── corporate_actions.py (~230) — FMP /dividends + /splits (Step 4 Component 4)
     ├── etf.py (~210)             — FMP /etf/holdings + 46-ETF universe catalog (Step 4 Component 5)
-    └── analyst.py (~340)         — FMP /grades + /price-target-consensus + /analyst-estimates (Step 4 Component 6)
+    ├── analyst.py (~340)         — FMP /grades + /price-target-consensus + /analyst-estimates (Step 4 Component 6)
+    └── filings.py (~210)         — FMP /sec-filings-search/symbol (Step 4 Component 7)
 ```
 
 Every module follows the same shape: module-level public functions, takes `client` + `data_store` as explicit args (except `macro.py` which has its own FRED/Yahoo clients since it's non-FMP).
@@ -81,6 +84,7 @@ All scripts under `scripts/`. Run from repo root with `PYTHONPATH=$(pwd)`.
 | `bulk_analyst_grades.py` | ~110 | One call per ticker — `/grades` returns all-history; UNIQUE(ticker, date, grading_company) dedup; default save scope 2015+ | Once to populate (~14 min); daily for new actions |
 | `bulk_price_targets.py` | ~110 | One call per ticker — singleton snapshot with synthesized snapshot_date; UNIQUE(ticker, snapshot_date) dedups same-day reruns | Weekly to track target revisions |
 | `bulk_analyst_estimates.py` | ~120 | Two calls per ticker (quarter + annual); UNIQUE(ticker, date, period); rows include both historical + forward periods | Once to populate (~28 min); after each earnings season |
+| `bulk_sec_filings.py` | ~140 | Paginated per-ticker over [from, to] window; crash-safe via `sec_filings_fetch_log`. Auto-resumes from `last_page + 1`. `--no-resume` for full re-scan | Once to populate (~3.5h wall); periodic re-runs for new filings |
 | `probe_fmp_endpoints.py` | 214 | Live probes for FMP endpoints (used to build the Step 4 inventory in 08_step4_endpoint_inventory.md) | As needed when adding new FMP endpoints |
 | `verify_fundamentals_db_crosscheck.py` | 87 | **Diagnostic only** (not a regression check) — compares fetcher output vs DB rows for AAPL/XOM/JPM. See its docstring for why they diverge. | Rarely — only if debugging post-processor drift |
 
@@ -89,8 +93,8 @@ Golden fixtures live in `tests/fixtures/` (10 `.pkl` files, ~500 KB total). Prob
 ### Expected suite output
 
 ```bash
-python scripts/verify_data_quality.py        # → 21/21 passed
-python scripts/verify_fixture_equivalence.py # → 24/24 passed
+python scripts/verify_data_quality.py        # → 22/22 passed
+python scripts/verify_fixture_equivalence.py # → 26/26 passed
 ```
 
 ## Completion log — what's been built
@@ -203,7 +207,21 @@ python scripts/verify_fixture_equivalence.py # → 24/24 passed
 - **First bulk run**: 182,523 grades across 680 tickers (2015-2026), 651 price-target snapshots (one per covered ticker), 41,486 estimates rows (16,578 annual + 24,908 quarter, range 1993-12-30 → 2034-01-03).
 - **Late fix**: forgot to add `analyst` to the `--only` default in `verify_fixture_equivalence.py` initially — fixture suite reported 20/20 instead of 24/24 until I added it. Quick one-line fix.
 
-## Step 4 remaining — 4 components
+### Step 4 Component 7 — `filings.py` — done (2026-05-08)
+
+- New module `src/data/fetcher/filings.py` (~210 lines) — second Class C (paginated) module after Component 3's ownership. Public API: `fetch_sec_filings_page`, `fetch_sec_filings`, `fetch_all_sec_filings`.
+- 2 new tables: `sec_filings` (UNIQUE 4-tuple ticker+filing_date+form_type+accepted_date) and `sec_filings_fetch_log` (per-ticker pagination checkpoint, mirrors `insider_trading_fetch_log`).
+- 4 new `DataStore` methods: `save_sec_filings`, `get_sec_filings`, `get_sec_fetch_progress`, `update_sec_fetch_progress`.
+- 1 new bulk script: `scripts/bulk_sec_filings.py` (~3.5h wall for full backfill).
+- L3 suite: 21 → 22 checks (`check_sec_filings_coverage`).
+- Fixture suite: 24 → 26 fixtures (`sec_filings_AAPL_2024` window + `sec_filings_AAPL_form4_2023` form-type slice).
+- **Endpoint quirk caught during smoke**: `/sec-filings-search/symbol` REQUIRES `from` and `to` params — returns HTTP 400 without them. Inventory row 13 lists them, but I missed they were required (not optional). Adapted module to take `from_date` (default 2015-01-01) + `to_date` (default today). The `from` param is a Python keyword so it's passed via dict-spread (`**{"from": from_date, "to": to_date}`).
+- **Form-type coverage unfiltered by design**: probe shows Form 4 dominates (46% of AAPL sample), but 8-K, 10-K, 10-Q, DEF 14A, 13D/13G, 144, S-1 etc. are all valuable for different analyses. 182 distinct form types landed in DB. Storage trivial (~250 MB). Filter at query time via `WHERE form_type = 'X'`.
+- **Form 4 overlap with `insider_trading`**: documented design choice. `insider_trading` has parsed transactions (who/qty/price); `sec_filings` has filing-level metadata. Both retained, joinable via `(ticker, filing_date)` if ever needed.
+- **First bulk run**: 808,130 rows across 675 tickers (40 tickers returned 0 — delisted/ADR/no-EDGAR), 182 distinct form types, 2009-01-15 → 2026-05-07 (some tickers go pre-2015 since FMP returns whatever's in the window). Wall: 12,966s ≈ 3.6h. 0 failures.
+- **UNIQUE collisions on FMP duplicates**: 8 rows out of 1500 in the 3-ticker smoke were collapsed by the UNIQUE 4-tuple — FMP occasionally returns the same filing twice across page boundaries. Expected; INSERT OR REPLACE handles it cleanly.
+
+## Step 4 remaining — 3 components
 
 Per the component-by-component execution agreed with the user (1 component → review → next). Overview lives in [09_step4_build_plan.md](./09_step4_build_plan.md). Detailed per-endpoint schemas live in [08_step4_endpoint_inventory.md](./08_step4_endpoint_inventory.md).
 
@@ -215,7 +233,7 @@ Per the component-by-component execution agreed with the user (1 component → r
 | 4 | `corporate_actions.py` (dividends + splits) | ✅ Done | Bundled module; 21K dividends + 203 splits |
 | 5 | `etf.py` (holdings) + ETF price backfill | ✅ Done | 11K holdings (36 ETFs) + 130K ETF prices (46 ETFs); 10 bond/commodity ETFs lack FMP holdings coverage |
 | 6 | `analyst.py` (grades + targets + estimates) | ✅ Done | 182K grades + 651 target snapshots + 41K estimates; 3 separate bulk scripts for different cadences |
-| 7 | `filings.py` (SEC) | — | paginated; requires `from`/`to` date params |
+| 7 | `filings.py` (SEC) | ✅ Done | 808K filings / 675 tickers / 182 form types; second Class C paginated module |
 | 8 | `transcripts.py` | — | long background pull: 42,529 transcripts ~ 12-24h wall |
 | 9 | `institutional.py` (13F) | — | curate ~100-CIK seed list first; pull per-CIK for all quarters |
 | 10 | News bulk | — | `news/stock` hard-capped at 250 per call; need date-window splitting; ~85K calls; ~12-24h wall |
@@ -267,10 +285,10 @@ If you need more detail than this doc provides:
 | Current component plan (when in plan mode) | `~/.claude/plans/*.md` |
 | Git history of actual changes | `git log --oneline docs/migration/ src/data/fetcher/ scripts/` |
 
-## How to resume work on Component 7 (`filings.py`)
+## How to resume work on Component 8 (`transcripts.py`)
 
 1. Read this doc (you're here).
-2. Skim `docs/migration/08_step4_endpoint_inventory.md` row 13 for SEC filings schema. Class C paginated — like insider trading.
-3. Ensure L3 + fixture suites pass (`21/21` and `24/24`).
+2. Skim `docs/migration/08_step4_endpoint_inventory.md` row 3 (transcripts) + 3a (transcript date index) — the **headliner of Step 4** in volume.
+3. Ensure L3 + fixture suites pass (`22/22` and `26/26`).
 4. Trigger plan mode; Claude will run Phase 1 exploration then draft a new plan file in `~/.claude/plans/`.
-5. Review + approve plan, then execute. Class C paginated module — can reuse the `insider_trading_fetch_log` pattern from Component 3 for crash-safe resume.
+5. Review + approve plan, then execute. Expected scope: ~42K transcripts, 60-100 MB of text, 12-24h overnight pull. Two-step fetch: pre-index `/earning-call-transcript-dates?symbol=X` for the (year, quarter) pairs per ticker (~715 calls cheap), then `/earning-call-transcript?symbol=X&year=Y&quarter=Q` per pair (~42K calls slow).

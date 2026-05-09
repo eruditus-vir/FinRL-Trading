@@ -83,6 +83,10 @@ ANALYST_GRADES_FIXTURE = ("AAPL", "2018-01-01", "2024-12-31")
 ANALYST_TARGETS_FIXTURE_TICKERS = ["AAPL", "MSFT", "NVDA"]
 ANALYST_ESTIMATES_FIXTURE_TICKER = "AAPL"
 
+# SEC filings (Step 4 Component 7): historical AAPL window + form-type slice.
+SEC_FILINGS_AAPL_WINDOW = ("AAPL", "2024-01-01", "2024-12-31")
+SEC_FILINGS_AAPL_FORM4_WINDOW = ("AAPL", "4", "2023-01-01", "2023-12-31")
+
 
 def _log(msg: str) -> None:
     print(f"[capture] {msg}", flush=True)
@@ -268,6 +272,29 @@ def capture_analyst() -> None:
         _log(f"  rows={len(df):,} cols={len(df.columns)}  {time.time()-t0:.1f}s")
 
 
+def capture_filings() -> None:
+    """SEC filings: historical AAPL year + Form-4 slice."""
+    from src.data.data_store import get_data_store
+    ds = get_data_store()
+
+    ticker, start, end = SEC_FILINGS_AAPL_WINDOW
+    path = FIXTURE_DIR / f"sec_filings_{ticker}_{start[:4]}.pkl"
+    t0 = time.time()
+    _log(f"sec_filings {ticker} {start}..{end} → {path.name} ...")
+    df = ds.get_sec_filings(ticker=ticker, start_date=start, end_date=end)
+    df.to_pickle(path)
+    _log(f"  rows={len(df):,} cols={len(df.columns)}  {time.time()-t0:.1f}s")
+
+    ticker, form, start, end = SEC_FILINGS_AAPL_FORM4_WINDOW
+    path = FIXTURE_DIR / f"sec_filings_{ticker}_form{form}_{start[:4]}.pkl"
+    t0 = time.time()
+    _log(f"sec_filings {ticker} form={form} {start}..{end} → {path.name} ...")
+    df = ds.get_sec_filings(ticker=ticker, form_type=form,
+                            start_date=start, end_date=end)
+    df.to_pickle(path)
+    _log(f"  rows={len(df):,} cols={len(df.columns)}  {time.time()-t0:.1f}s")
+
+
 def capture_sp500() -> None:
     from src.data.data_fetcher import fetch_sp500_tickers
     path = FIXTURE_DIR / "sp500.pkl"
@@ -303,6 +330,7 @@ def main():
     capture_corporate_actions()
     capture_etf()
     capture_analyst()
+    capture_filings()
 
     _log("DONE. Fixtures in " + str(FIXTURE_DIR))
     for p in sorted(FIXTURE_DIR.glob("*.pkl")):

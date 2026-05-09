@@ -85,6 +85,11 @@ from src.data.fetcher.analyst import (
     fetch_all_analyst_estimates,
     ESTIMATE_PERIODS,
 )
+from src.data.fetcher.filings import (
+    fetch_sec_filings,
+    fetch_sec_filings_page,
+    fetch_all_sec_filings,
+)
 from src.data.fetcher.universes import get_universe_tickers
 
 __all__ = [
@@ -141,4 +146,8 @@ __all__ = [
     "fetch_all_price_targets",
     "fetch_all_analyst_estimates",
     "ESTIMATE_PERIODS",
+    # SEC filings (Step 4 Component 7)
+    "fetch_sec_filings",
+    "fetch_sec_filings_page",
+    "fetch_all_sec_filings",
 ]
